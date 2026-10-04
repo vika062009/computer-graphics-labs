@@ -34,23 +34,23 @@
 ```powershell
 git clone https://github.com/vika062009/computer-graphics-labs.git
 cd computer-graphics-labs
-cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64
-cmake --build build-msvc --config Debug --parallel
+cmake --preset msvc-debug
+cmake --build build-debug --config Debug --parallel
 ```
 
 Шейдеры автоматически компилируются в `.spv` с помощью `glslc`.
 
 ### Запуск
 
+Из корня проекта выполнить:
+
 ```powershell
-cd build-msvc
+cd build-debug
 .\Debug\vulkan-starter-app.exe
 ```
 
-Запускать нужно с рабочей папкой `build-msvc`, поскольку пути
-к шейдерам в коде заданы как `../shaders/cone.vert.spv`
-и `../shaders/cone.frag.spv`.
-
+Рабочая папка при запуске — `build-debug`, поскольку пути к шейдерам
+заданы как `../shaders/cone.vert.spv` и `../shaders/cone.frag.spv`.
 ## Структура проекта
 
 - `source/` - исходный код приложения.
