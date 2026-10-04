@@ -1,66 +1,62 @@
-# 🌋 Vulkan Starter App
+# Лабораторные работы по компьютерной графике
 
-## Getting started
+Проект основан на [шаблоне](https://github.com/vladeemerr/vulkan-starter-app).
 
-You need C++ compiler, Vulkan SDK and CMake installed before you can build this project.
+## Лабораторная работа №1
 
-This project uses C++20 standard and thus requires either of those compilers:
-- GCC 10.X
-- Clang 10
-- Microsoft Visual Studio 2019
+**Вариант №9 — конус.**
 
-This is officially tested on *Windows* and *GNU/Linux platforms*, no *macOS* support yet.
-If you have a working macOS solution of this code, consider submitting a PR so others
-can build this example code without a hassle!
+Цель: познакомиться с основами 3D-графики: построением простых
+3D-объектов и их проецированием на 2D-плоскость, а также освоить
+работу с матрицами перспективной и ортографической проекций
+и аффинными преобразованиями.
 
-<ins>**1. Downloading the repository**</ins>
+## Изменения шаблона
 
-Start by cloning the repository with `git clone --depth 1 https://github.com/vladeemerr/vulkan-starter-app`
+При адаптации к используемой видеокарте AMD в `graphics_internal.cpp`
+добавлен выбор поддерживаемого формата глубины.
+Также исправлена настройка пула дескрипторов ImGui.
 
-This repository does not contain any submodules, it utilizes CMake's `FetchContent` feature instead.
+## Сборка и запуск в Windows
 
-<ins>**2. Configuring the project**</ins>
+Необходимы:
 
-Run either one of the CMake lines to download dependencies and configure the project:
+- Visual Studio 2022 с компонентами разработки на C++;
+- CMake 3.20 или выше;
+- Git и Vulkan SDK;
+- видеокарта и драйвер с поддержкой Vulkan.
 
-```bash
-cmake --preset debug       # for GNU/Linux (GCC/Clang)
-cmake --preset msvc-debug  # for Windows (Visual Studio 2019)
-cmake --preset mingw-debug # for Windows (MinGW)
+Команды `git`, `cmake` и `glslc` должны быть доступны в терминале.
+Зависимости скачиваются автоматически при первой сборке.
+
+### Скачивание и сборка
+
+```powershell
+git clone https://github.com/vika062009/computer-graphics-labs.git
+cd computer-graphics-labs
+cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64
+cmake --build build-msvc --config Debug --parallel
 ```
 
-If you wish to build in `release` mode, change `debug` to `release`.
+Шейдеры автоматически компилируются в `.spv` с помощью `glslc`.
 
-If changes are made (added/removed files), or if you want to regenerate project files, rerun the command above.
+### Запуск
 
-<ins>**3. Building**</ins>
-
-To build the project, use the line below. You are most likely using `debug` preset, so
-the directory that will eventually contain your build files is named `build-debug`.
-
-Likewise for `release` that directory will be named `build-release`
-
-Run one those commands, depending on which preset you chose:
-
-```bash
-cmake --build build-debug --parallel # for debug
-cmake --build build-release --parallel # for release
+```powershell
+cd build-msvc
+.\Debug\vulkan-starter-app.exe
 ```
 
-### Running
+Запускать нужно с рабочей папкой `build-msvc`, поскольку пути
+к шейдерам в коде заданы как `../shaders/cone.vert.spv`
+и `../shaders/cone.frag.spv`.
 
-`build-*` directory will contain the executable in one of the subdirectories after successful build.
+## Структура проекта
 
-For `msvc-{debug|release}` builds output subdirectory is set to `Debug` or `Release` respectively.
-For other configurations output subdirectory is set to `vulkan-starter-app`.
+- `source/` - исходный код приложения.
+- `shaders/` - вершинный и фрагментный шейдеры.
+- `CMakeLists.txt` - настройки сборки.
+- `reports/` - папка для отчётов в PDF.
 
-**Make sure your working directory is set to the project root!**
-Project root is where this README file resides. Otherwise, the
-code responsible for loading shaders or other resources from files will fail,
-because relative paths are used.
-
-### Compiling shaders
-
-`CMakeLists.txt` has a build recipe for compiling shader files
-along with an application. Look for a comment in this file to see
-how to compile your shaders.
+Разработка ведётся в ветке `master`.
+Завершённые лабораторные отмечаются тегами.
