@@ -39,7 +39,6 @@ namespace application {
             float tint[4];
         };
 
-        // ===== Буферы =====
         VkBuffer vk_vertex_buffer = VK_NULL_HANDLE;
         VmaAllocation vk_vertex_buffer_allocation = VK_NULL_HANDLE;
         Vertex* vk_vertex_buffer_memory = nullptr;
@@ -67,7 +66,6 @@ namespace application {
 
         enum class ProjectionMode { Perspective, Orthographic };
 
-        // Each object has its own parameters; formulas are unchanged.
         struct ConeState {
             ProjectionMode projection_mode = ProjectionMode::Perspective;
             float fov_degrees = 60.0f;
@@ -701,7 +699,6 @@ namespace application {
         ImGui::End();
 
         for (auto& cone : g_cones) {
-            // Только изменение времени зависит от Playing.
             if (cone.g_anim_playing) {
                 cone.g_anim_time += float(dt) * cone.g_anim_speed;
             }
@@ -711,7 +708,6 @@ namespace application {
             float T[4][4], R[4][4], S[4][4];
             float Rx[4][4], Ry[4][4], Rz[4][4], tmp1[4][4];
 
-            // Положение вычисляется и при паузе — по замороженному времени.
             const float px =
                 cone.g_position[0] + cone.g_anim_radius * cosf(t);
 
@@ -783,8 +779,6 @@ namespace application {
     {
         auto& ctx = graphics::internal::context;
 
-        // The starter's prepare() waits for the previous frame before render().
-        // Upload here, after that wait, rather than overwriting GPU data in update().
         for (uint32_t i = 0; i < CONE_COUNT; ++i) {
             memcpy(vk_uniform_buffer_memory[i]->model, g_cones[i].g_model,
                 sizeof(g_cones[i].g_model));
