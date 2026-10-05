@@ -4,6 +4,8 @@
 #include <vulkan/vulkan.h>
 
 #include <cmath>
+#include <cstdint>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -14,6 +16,8 @@
 namespace application {
 
     namespace {
+
+        constexpr uint32_t CONE_COUNT = 3;
 
         constexpr uint32_t CONE_SEGMENTS = 50;
         constexpr float CONE_RADIUS = 0.5f;
@@ -45,13 +49,13 @@ namespace application {
         uint32_t* vk_index_buffer_memory = nullptr;
         uint32_t vk_index_count = 0;
 
-        VkBuffer vk_uniform_buffer = VK_NULL_HANDLE;
-        VmaAllocation vk_uniform_buffer_allocation = VK_NULL_HANDLE;
-        GlobalUniforms* vk_uniform_buffer_memory = nullptr;
+        VkBuffer vk_uniform_buffer[CONE_COUNT] = {};
+        VmaAllocation vk_uniform_buffer_allocation[CONE_COUNT] = {};
+        GlobalUniforms* vk_uniform_buffer_memory[CONE_COUNT] = {};
 
         VkDescriptorSetLayout vk_descriptor_set_layout = VK_NULL_HANDLE;
         VkDescriptorPool vk_descriptor_pool = VK_NULL_HANDLE;
-        VkDescriptorSet vk_descriptor_set = VK_NULL_HANDLE;
+        VkDescriptorSet vk_descriptor_set[CONE_COUNT] = {};
 
         VkPipelineLayout vk_pipeline_layout = VK_NULL_HANDLE;
         VkPipeline vk_pipeline = VK_NULL_HANDLE;
@@ -59,27 +63,33 @@ namespace application {
         VkShaderModule vk_vertex_shader = VK_NULL_HANDLE;
         VkShaderModule vk_fragment_shader = VK_NULL_HANDLE;
 
-        float g_model[4][4];
         float g_view[4][4];
-        float g_projection[4][4];
 
         enum class ProjectionMode { Perspective, Orthographic };
-        ProjectionMode g_projection_mode = ProjectionMode::Perspective;
-        float g_fov_degrees = 60.0f;
-        float g_ortho_scale = 1.5f;
 
-        float g_position[3] = { 0.0f, 0.0f, 0.0f };
-        float g_rotation_degrees[3] = { 0.0f, 0.0f, 0.0f };
-        float g_scale[3] = { 1.0f, 1.0f, 1.0f };
+        // Each object has its own parameters; formulas are unchanged.
+        struct ConeState {
+            ProjectionMode projection_mode = ProjectionMode::Perspective;
+            float fov_degrees = 60.0f;
+            float ortho_scale = 1.5f;
+            float projection[4][4] = {};
+            float g_position[3] = { 0.0f, 0.0f, 0.0f };
+            float g_rotation_degrees[3] = { 0.0f, 0.0f, 0.0f };
+            float g_scale[3] = { 1.0f, 1.0f, 1.0f };
 
-        bool  g_anim_playing = true;
-        float g_anim_speed = 1.0f;
-        float g_anim_radius = 1.5f;
-        float g_anim_height = 0.0f;
-        float g_anim_rot_speed = 1.0f;
-        float g_anim_time = 0.0f;
+            bool  g_anim_playing = true;
+            float g_anim_speed = 1.0f;
+            float g_anim_radius = 1.5f;
+            float g_anim_height = 0.0f;
+            float g_anim_rot_speed = 1.0f;
+            float g_anim_time = 0.0f;
 
-        float g_tint[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+            float g_tint[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+
+            float g_model[4][4] = {};
+        };
+        ConeState g_cones[CONE_COUNT];
+        int g_selected_cone = 0;
 
         double g_last_time = 0.0;
 
@@ -258,8 +268,11 @@ namespace application {
                     return false;
                 }
                 vk_vertex_buffer_memory = static_cast<Vertex*>(alloc_info.pMappedData);
+                if (!vk_vertex_buffer_memory) return false;
                 memcpy(vk_vertex_buffer_memory, vertices.data(),
                     sizeof(Vertex) * vertices.size());
+                if (vmaFlushAllocation(ctx.allocator, vk_vertex_buffer_allocation,
+                    0, VK_WHOLE_SIZE) != VK_SUCCESS) return false;
             }
 
             {
@@ -282,8 +295,11 @@ namespace application {
                     return false;
                 }
                 vk_index_buffer_memory = static_cast<uint32_t*>(alloc_info.pMappedData);
+                if (!vk_index_buffer_memory) return false;
                 memcpy(vk_index_buffer_memory, indices.data(),
                     sizeof(uint32_t) * indices.size());
+                if (vmaFlushAllocation(ctx.allocator, vk_index_buffer_allocation,
+                    0, VK_WHOLE_SIZE) != VK_SUCCESS) return false;
             }
 
             return true;
@@ -304,14 +320,17 @@ namespace application {
                          VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
                 .usage = VMA_MEMORY_USAGE_AUTO,
             };
-            VmaAllocationInfo alloc_info{};
-            if (vmaCreateBuffer(ctx.allocator, &info, &alloc,
-                &vk_uniform_buffer, &vk_uniform_buffer_allocation,
-                &alloc_info) != VK_SUCCESS) {
-                std::cerr << "Failed to create uniform buffer\n";
-                return false;
+            for (uint32_t i = 0; i < CONE_COUNT; ++i) {
+                VmaAllocationInfo alloc_info{};
+                if (vmaCreateBuffer(ctx.allocator, &info, &alloc,
+                    &vk_uniform_buffer[i], &vk_uniform_buffer_allocation[i],
+                    &alloc_info) != VK_SUCCESS) {
+                    std::cerr << "Failed to create uniform buffer\n";
+                    return false;
+                }
+                vk_uniform_buffer_memory[i] = static_cast<GlobalUniforms*>(alloc_info.pMappedData);
+                if (!vk_uniform_buffer_memory[i]) return false;
             }
-            vk_uniform_buffer_memory = static_cast<GlobalUniforms*>(alloc_info.pMappedData);
             return true;
         }
 
@@ -340,11 +359,11 @@ namespace application {
 
             const VkDescriptorPoolSize pool_size = {
                 .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .descriptorCount = 1,
+                .descriptorCount = CONE_COUNT,
             };
             const VkDescriptorPoolCreateInfo pool_info = {
                 .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-                .maxSets = 1,
+                .maxSets = CONE_COUNT,
                 .poolSizeCount = 1,
                 .pPoolSizes = &pool_size,
             };
@@ -354,32 +373,35 @@ namespace application {
                 return false;
             }
 
-            const VkDescriptorSetAllocateInfo alloc_info = {
-                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                .descriptorPool = vk_descriptor_pool,
-                .descriptorSetCount = 1,
-                .pSetLayouts = &vk_descriptor_set_layout,
-            };
-            if (vkAllocateDescriptorSets(ctx.device, &alloc_info,
-                &vk_descriptor_set) != VK_SUCCESS) {
-                std::cerr << "Failed to allocate descriptor set\n";
-                return false;
-            }
+            for (uint32_t i = 0; i < CONE_COUNT; ++i) {
+                const VkDescriptorSetAllocateInfo alloc_info = {
+                    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                    .descriptorPool = vk_descriptor_pool,
+                    .descriptorSetCount = 1,
+                    .pSetLayouts = &vk_descriptor_set_layout,
+                };
+                if (vkAllocateDescriptorSets(ctx.device, &alloc_info,
+                    &vk_descriptor_set[i]) != VK_SUCCESS) {
+                    std::cerr << "Failed to allocate descriptor set\n";
+                    return false;
+                }
 
-            const VkDescriptorBufferInfo buffer_info = {
-                .buffer = vk_uniform_buffer,
-                .offset = 0,
-                .range = sizeof(GlobalUniforms),
-            };
-            const VkWriteDescriptorSet write = {
-                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = vk_descriptor_set,
-                .dstBinding = 0,
-                .descriptorCount = 1,
-                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .pBufferInfo = &buffer_info,
-            };
-            vkUpdateDescriptorSets(ctx.device, 1, &write, 0, nullptr);
+                const VkDescriptorBufferInfo buffer_info = {
+                    .buffer = vk_uniform_buffer[i],
+                    .offset = 0,
+                    .range = sizeof(GlobalUniforms),
+                };
+                const VkWriteDescriptorSet write = {
+                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    .dstSet = vk_descriptor_set[i],
+                    .dstBinding = 0,
+                    .descriptorCount = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    .pBufferInfo = &buffer_info,
+                };
+                vkUpdateDescriptorSets(ctx.device, 1, &write, 0, nullptr);
+
+            }
 
             return true;
         }
@@ -554,17 +576,36 @@ namespace application {
 
     bool initialize()
     {
-        if (!createConeGeometry()) return false;
-        if (!createUniformBuffer()) return false;
-        if (!createDescriptorSet()) return false;
-        if (!createPipeline()) return false;
+        if (!createConeGeometry() || !createUniformBuffer() ||
+            !createDescriptorSet() || !createPipeline()) {
+            shutdown();
+            return false;
+        }
 
-        mat4_identity(g_model);
+        for (auto& cone : g_cones) mat4_identity(cone.g_model);
+        g_cones[1].g_position[0] = -1.25f;
+        g_cones[1].g_tint[0] = 1.0f;
+        g_cones[1].g_tint[1] = 0.4f;
+        g_cones[1].g_tint[2] = 0.4f;
+        g_cones[1].g_anim_playing = false;
+        g_cones[2].g_position[2] = 0.75f;
+        g_cones[2].g_tint[0] = 0.4f;
+        g_cones[2].g_tint[1] = 0.6f;
+        g_cones[2].g_tint[2] = 1.0f;
+        g_cones[2].g_anim_playing = false;
         mat4_look_at_origin(3.0f, g_view);
 
         const float aspect = float(graphics::internal::context.swapchain_extent.width) /
             float(graphics::internal::context.swapchain_extent.height);
-        mat4_perspective(g_fov_degrees * PI / 180.0f, aspect, 0.1f, 100.0f, g_projection);
+        for (auto& cone : g_cones) {
+            mat4_perspective(
+                cone.fov_degrees * PI / 180.0f,
+                aspect,
+                0.1f,
+                100.0f,
+                cone.projection
+            );
+        }
 
         g_last_time = 0.0;
 
@@ -584,9 +625,16 @@ namespace application {
         vkDestroyDescriptorPool(ctx.device, vk_descriptor_pool, nullptr);
         vkDestroyDescriptorSetLayout(ctx.device, vk_descriptor_set_layout, nullptr);
 
-        vmaDestroyBuffer(ctx.allocator, vk_uniform_buffer, vk_uniform_buffer_allocation);
-        vmaDestroyBuffer(ctx.allocator, vk_index_buffer, vk_index_buffer_allocation);
-        vmaDestroyBuffer(ctx.allocator, vk_vertex_buffer, vk_vertex_buffer_allocation);
+        for (uint32_t i = 0; i < CONE_COUNT; ++i) {
+            if (vk_uniform_buffer[i]) {
+                vmaDestroyBuffer(ctx.allocator, vk_uniform_buffer[i], vk_uniform_buffer_allocation[i]);
+                vk_uniform_buffer[i] = VK_NULL_HANDLE;
+                vk_uniform_buffer_allocation[i] = nullptr;
+                vk_uniform_buffer_memory[i] = nullptr;
+            }
+        }
+        if (vk_index_buffer) vmaDestroyBuffer(ctx.allocator, vk_index_buffer, vk_index_buffer_allocation);
+        if (vk_vertex_buffer) vmaDestroyBuffer(ctx.allocator, vk_vertex_buffer, vk_vertex_buffer_allocation);
     }
 
     void update(double time)
@@ -596,97 +644,163 @@ namespace application {
 
         ImGui::Begin("Lab 1 - Cone (Variant 9)");
 
+        ImGui::TextUnformatted("Select cone:");
+        ImGui::RadioButton("Cone 1", &g_selected_cone, 0);
+        ImGui::SameLine();
+        ImGui::RadioButton("Cone 2", &g_selected_cone, 1);
+        ImGui::SameLine();
+        ImGui::RadioButton("Cone 3", &g_selected_cone, 2);
+        auto& selected = g_cones[g_selected_cone];
+
         ImGui::SeparatorText("Projection");
-        int proj_mode = static_cast<int>(g_projection_mode);
+
+        int proj_mode = static_cast<int>(selected.projection_mode);
+
         ImGui::RadioButton("Perspective", &proj_mode, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Orthographic", &proj_mode, 1);
-        g_projection_mode = static_cast<ProjectionMode>(proj_mode);
 
-        if (g_projection_mode == ProjectionMode::Perspective) {
-            ImGui::SliderFloat("FOV (deg)", &g_fov_degrees, 20.0f, 120.0f);
+        selected.projection_mode = static_cast<ProjectionMode>(proj_mode);
+
+        if (selected.projection_mode == ProjectionMode::Perspective) {
+            ImGui::SliderFloat(
+                "FOV (deg)",
+                &selected.fov_degrees,
+                20.0f,
+                120.0f
+            );
         }
         else {
-            ImGui::SliderFloat("Ortho scale", &g_ortho_scale, 0.2f, 5.0f);
+            ImGui::SliderFloat(
+                "Ortho scale",
+                &selected.ortho_scale,
+                0.2f,
+                5.0f
+            );
         }
 
         ImGui::SeparatorText("Transform");
-        ImGui::SliderFloat3("Position", g_position, -3.0f, 3.0f);
-        ImGui::SliderFloat3("Rotation (deg)", g_rotation_degrees, -180.0f, 180.0f);
-        ImGui::SliderFloat3("Scale", g_scale, 0.1f, 3.0f);
+        ImGui::SliderFloat3("Position", selected.g_position, -3.0f, 3.0f);
+        ImGui::SliderFloat3("Rotation (deg)", selected.g_rotation_degrees, -180.0f, 180.0f);
+        ImGui::SliderFloat3("Scale", selected.g_scale, 0.1f, 3.0f);
 
         ImGui::SeparatorText("Animation");
-        ImGui::Checkbox("Playing", &g_anim_playing);
-        ImGui::SliderFloat("Speed", &g_anim_speed, 0.0f, 5.0f);
-        ImGui::SliderFloat("Trajectory radius", &g_anim_radius, 0.0f, 5.0f);
-        ImGui::SliderFloat("Trajectory height", &g_anim_height, -2.0f, 2.0f);
-        ImGui::SliderFloat("Self-rotation speed", &g_anim_rot_speed, 0.0f, 5.0f);
+        ImGui::Checkbox("Playing", &selected.g_anim_playing);
+        ImGui::SliderFloat("Speed", &selected.g_anim_speed, 0.0f, 5.0f);
+        ImGui::SliderFloat("Trajectory radius", &selected.g_anim_radius, 0.0f, 5.0f);
+        ImGui::SliderFloat("Trajectory height", &selected.g_anim_height, -2.0f, 2.0f);
+        ImGui::SliderFloat("Self-rotation speed", &selected.g_anim_rot_speed, 0.0f, 5.0f);
 
         if (ImGui::Button("Reset animation time")) {
-            g_anim_time = 0.0f;
+            selected.g_anim_time = 0.0f;
         }
 
         ImGui::SeparatorText("Color");
-        ImGui::ColorEdit3("Tint", g_tint);
+        ImGui::ColorEdit3("Tint", selected.g_tint);
 
         ImGui::End();
 
-        if (g_anim_playing) {
-            g_anim_time += float(dt) * g_anim_speed;
+        for (auto& cone : g_cones) {
+            // Только изменение времени зависит от Playing.
+            if (cone.g_anim_playing) {
+                cone.g_anim_time += float(dt) * cone.g_anim_speed;
+            }
+
+            const float t = cone.g_anim_time;
+
+            float T[4][4], R[4][4], S[4][4];
+            float Rx[4][4], Ry[4][4], Rz[4][4], tmp1[4][4];
+
+            // Положение вычисляется и при паузе — по замороженному времени.
+            const float px =
+                cone.g_position[0] + cone.g_anim_radius * cosf(t);
+
+            const float py =
+                cone.g_position[1] + cone.g_anim_height;
+
+            const float pz =
+                cone.g_position[2] + cone.g_anim_radius * sinf(t);
+
+            mat4_translation(px, py, pz, T);
+
+            const float anim_rot_y = t * cone.g_anim_rot_speed;
+
+            mat4_rotation_x(
+                cone.g_rotation_degrees[0] * PI / 180.0f, Rx);
+
+            mat4_rotation_y(
+                cone.g_rotation_degrees[1] * PI / 180.0f + anim_rot_y, Ry);
+
+            mat4_rotation_z(
+                cone.g_rotation_degrees[2] * PI / 180.0f, Rz);
+
+            mat4_multiply(Ry, Rx, tmp1);
+            mat4_multiply(tmp1, Rz, R);
+
+            mat4_scale(
+                cone.g_scale[0],
+                cone.g_scale[1],
+                cone.g_scale[2],
+                S
+            );
+
+            mat4_multiply(R, S, tmp1);
+            mat4_multiply(T, tmp1, cone.g_model);
         }
-
-        float T[4][4], R[4][4], S[4][4];
-        float Rx[4][4], Ry[4][4], Rz[4][4], tmp1[4][4], tmp2[4][4];
-
-        float px = g_position[0];
-        float py = g_position[1];
-        float pz = g_position[2];
-
-        if (g_anim_playing) {
-            px += g_anim_radius * cosf(g_anim_time);
-            pz += g_anim_radius * sinf(g_anim_time);
-            py += g_anim_height;
-        }
-
-        mat4_translation(px, py, pz, T);
-
-        const float anim_rot_y = g_anim_playing
-            ? g_anim_time * g_anim_rot_speed
-            : 0.0f;
-
-        mat4_rotation_x(g_rotation_degrees[0] * PI / 180.0f, Rx);
-        mat4_rotation_y(g_rotation_degrees[1] * PI / 180.0f + anim_rot_y, Ry);
-        mat4_rotation_z(g_rotation_degrees[2] * PI / 180.0f, Rz);
-
-        mat4_multiply(Ry, Rx, tmp1);
-        mat4_multiply(tmp1, Rz, R);
-
-        mat4_scale(g_scale[0], g_scale[1], g_scale[2], S);
-
-        mat4_multiply(R, S, tmp1);
-        mat4_multiply(T, tmp1, g_model);
 
         const float aspect = float(graphics::internal::context.swapchain_extent.width) /
             float(graphics::internal::context.swapchain_extent.height);
 
-        if (g_projection_mode == ProjectionMode::Perspective) {
-            mat4_perspective(g_fov_degrees * PI / 180.0f, aspect, 0.1f, 100.0f, g_projection);
-        }
-        else {
-            const float half_h = g_ortho_scale;
-            const float half_w = half_h * aspect;
-            mat4_ortho(-half_w, half_w, half_h, -half_h, 0.1f, 100.0f, g_projection);
+        for (auto& cone : g_cones) {
+            if (cone.projection_mode == ProjectionMode::Perspective) {
+                mat4_perspective(
+                    cone.fov_degrees * PI / 180.0f,
+                    aspect,
+                    0.1f,
+                    100.0f,
+                    cone.projection
+                );
+            }
+            else {
+                const float half_h = cone.ortho_scale;
+                const float half_w = half_h * aspect;
+
+                mat4_ortho(
+                    -half_w,
+                    half_w,
+                    half_h,
+                    -half_h,
+                    0.1f,
+                    100.0f,
+                    cone.projection
+                );
+            }
         }
 
-        memcpy(vk_uniform_buffer_memory->model, g_model, sizeof(g_model));
-        memcpy(vk_uniform_buffer_memory->view, g_view, sizeof(g_view));
-        memcpy(vk_uniform_buffer_memory->projection, g_projection, sizeof(g_projection));
-        memcpy(vk_uniform_buffer_memory->tint, g_tint, sizeof(g_tint));
     }
 
     void render(const graphics::internal::FrameData& fd)
     {
         auto& ctx = graphics::internal::context;
+
+        // The starter's prepare() waits for the previous frame before render().
+        // Upload here, after that wait, rather than overwriting GPU data in update().
+        for (uint32_t i = 0; i < CONE_COUNT; ++i) {
+            memcpy(vk_uniform_buffer_memory[i]->model, g_cones[i].g_model,
+                sizeof(g_cones[i].g_model));
+            memcpy(vk_uniform_buffer_memory[i]->view, g_view, sizeof(g_view));
+            memcpy(
+                vk_uniform_buffer_memory[i]->projection,
+                g_cones[i].projection,
+                sizeof(g_cones[i].projection)
+            );
+            memcpy(vk_uniform_buffer_memory[i]->tint, g_cones[i].g_tint,
+                sizeof(g_cones[i].g_tint));
+            if (vmaFlushAllocation(ctx.allocator, vk_uniform_buffer_allocation[i],
+                0, sizeof(GlobalUniforms)) != VK_SUCCESS) {
+                std::cerr << "Failed to flush uniform buffer\n";
+            }
+        }
 
         vkResetCommandBuffer(fd.command_buffer, 0);
 
@@ -728,10 +842,13 @@ namespace application {
         const VkDeviceSize vertex_offset = 0;
         vkCmdBindVertexBuffers(fd.command_buffer, 0, 1, &vk_vertex_buffer, &vertex_offset);
         vkCmdBindIndexBuffer(fd.command_buffer, vk_index_buffer, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdBindDescriptorSets(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            vk_pipeline_layout, 0, 1, &vk_descriptor_set, 0, nullptr);
+        for (uint32_t i = 0; i < CONE_COUNT; ++i) {
+            vkCmdBindDescriptorSets(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                vk_pipeline_layout, 0, 1, &vk_descriptor_set[i], 0, nullptr);
 
-        vkCmdDrawIndexed(fd.command_buffer, vk_index_count, 1, 0, 0, 0);
+            vkCmdDrawIndexed(fd.command_buffer, vk_index_count, 1, 0, 0, 0);
+
+        }
 
         vkCmdEndRenderPass(fd.command_buffer);
         vkEndCommandBuffer(fd.command_buffer);
