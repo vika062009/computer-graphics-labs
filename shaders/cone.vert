@@ -10,30 +10,28 @@ layout(location = 2) out vec3 out_color;
 
 layout(std140, set = 0, binding = 0) uniform SceneUniforms {
     mat4 view_projection;
+    vec3 camera_position;
+    vec3 directional_light_direction;
+    vec3 directional_light_color;
+    vec3 ambient_light;
+    uint point_light_count;
+    uint spot_light_count;
+} scene_uniforms;
 
-    vec4 camera_position;
-    vec4 light_direction;
-    vec4 light_color_intensity;
-    vec4 ambient_color_intensity;
-} scene;
-
-layout(std140, set = 1, binding = 0) uniform ModelUniforms {
+layout(std140, set = 1, binding = 0) uniform ModelUniform {
     mat4 model;
-    vec4 tint;
-    vec4 specular_shininess;
-} object;
+    vec3 albedo;
+    vec3 specular;
+    float alpha;
+} model_uniforms;
 
 void main()
 {
-    vec4 world_position =
-        object.model * vec4(in_position, 1.0);
-
-    mat3 normal_matrix =
-        transpose(inverse(mat3(object.model)));
+    vec4 world_position = model_uniforms.model * vec4(in_position, 1.0);
+    mat3 normal_matrix = transpose(inverse(mat3(model_uniforms.model)));
 
     out_world_position = world_position.xyz;
     out_world_normal = normal_matrix * in_normal;
     out_color = in_color;
-
-    gl_Position = scene.view_projection * world_position;
+    gl_Position = scene_uniforms.view_projection * world_position;
 }

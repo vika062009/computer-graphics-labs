@@ -1,4 +1,5 @@
 ﻿#include "application.hpp"
+#include "graphics.hpp"
 
 #include <imgui.h>
 #include <vulkan/vulkan.h>
@@ -33,44 +34,56 @@ namespace application {
             float normal[3];
         };
 
-        struct SceneUniforms {
+        struct alignas(16) SceneUniforms {
             float view_projection[4][4];
-
-            float camera_position[4];
-            float light_direction[4];
-            float light_color_intensity[4];
-            float ambient_color_intensity[4];
+            alignas(16) float camera_position[3];
+            alignas(16) float directional_light_direction[3];
+            alignas(16) float directional_light_color[3];
+            alignas(16) float ambient_light[3];
+            uint32_t point_light_count;
+            uint32_t spot_light_count;
         };
 
-        struct ModelUniforms {
+        struct alignas(16) ModelUniform {
             float model[4][4];
-            float tint[4];
-            float specular_shininess[4];
+            alignas(16) float albedo[3];
+            alignas(16) float specular[3];
+            float alpha;
         };
 
-        static_assert(sizeof(SceneUniforms) == 128);
-        static_assert(sizeof(ModelUniforms) == 96);
-
-        struct PointLight {
-            float position[4];
-            float color_intensity[4];
+        struct alignas(16) PointLight {
+            alignas(16) float position[3];
+            alignas(16) float color[3];
+            float intensity;
         };
 
-        struct SpotLight {
-            float position[4];
-            float direction[4];
-            float color_intensity[4];
-            float cone_angles[4];
+        struct alignas(16) SpotLight {
+            alignas(16) float position[3];
+            alignas(16) float color[3];
+            alignas(16) float direction[3];
+            float angle;
+            float outer_angle;
+            float intensity;
         };
 
-        struct LightBufferHeader {
-            uint32_t count;
-            uint32_t padding[3];
-        };
-
+        static_assert(sizeof(SceneUniforms) == 144);
+        static_assert(offsetof(SceneUniforms, camera_position) == 64);
+        static_assert(offsetof(SceneUniforms, directional_light_direction) == 80);
+        static_assert(offsetof(SceneUniforms, directional_light_color) == 96);
+        static_assert(offsetof(SceneUniforms, ambient_light) == 112);
+        static_assert(offsetof(SceneUniforms, point_light_count) == 124);
+        static_assert(offsetof(SceneUniforms, spot_light_count) == 128);
+        static_assert(sizeof(ModelUniform) == 96);
+        static_assert(offsetof(ModelUniform, albedo) == 64);
+        static_assert(offsetof(ModelUniform, specular) == 80);
+        static_assert(offsetof(ModelUniform, alpha) == 92);
         static_assert(sizeof(PointLight) == 32);
+        static_assert(offsetof(PointLight, color) == 16);
         static_assert(sizeof(SpotLight) == 64);
-        static_assert(sizeof(LightBufferHeader) == 16);
+        static_assert(offsetof(SpotLight, color) == 16);
+        static_assert(offsetof(SpotLight, direction) == 32);
+        static_assert(offsetof(SpotLight, angle) == 44);
+        static_assert(offsetof(SpotLight, outer_angle) == 48);
 
         std::vector<PointLight> g_point_lights;
         std::vector<SpotLight> g_spot_lights;
@@ -86,6 +99,8 @@ namespace application {
         LightStorageBuffer g_spot_light_buffer;
 
         bool g_lights_dirty = false;
+        uint32_t g_uploaded_point_count = 0;
+        uint32_t g_uploaded_spot_count = 0;
 
         VkBuffer vk_vertex_buffer = VK_NULL_HANDLE;
         VmaAllocation vk_vertex_buffer_allocation = VK_NULL_HANDLE;
@@ -102,7 +117,7 @@ namespace application {
 
         VkBuffer vk_uniform_buffer[CONE_COUNT] = {};
         VmaAllocation vk_uniform_buffer_allocation[CONE_COUNT] = {};
-        ModelUniforms* vk_uniform_buffer_memory[CONE_COUNT] = {};
+        ModelUniform* vk_uniform_buffer_memory[CONE_COUNT] = {};
 
         VkDescriptorSetLayout vk_scene_set_layout = VK_NULL_HANDLE;
         VkDescriptorSet vk_scene_descriptor_set = VK_NULL_HANDLE;
@@ -154,10 +169,10 @@ namespace application {
             float g_anim_rot_speed = 1.0f;
             float g_anim_time = 0.0f;
 
-            float g_tint[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+            float g_albedo[3] = { 1.0f, 1.0f, 1.0f };
 
             float g_specular_color[3] = { 0.25f, 0.25f, 0.25f };
-            float g_shininess = 32.0f;
+            float g_alpha = 32.0f;
 
             float g_model[4][4] = {};
         };
@@ -308,77 +323,6 @@ namespace application {
             }
         }
 
-        template<typename T>
-        bool createMappedBuffer(
-            VkDeviceSize size,
-            VkBufferUsageFlags usage,
-            VkBuffer& buffer,
-            VmaAllocation& allocation,
-            T*& memory,
-            const void* initial_data = nullptr)
-        {
-            auto& ctx = graphics::internal::context;
-
-            const VkBufferCreateInfo buffer_info = {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                .size = size,
-                .usage = usage,
-                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            };
-
-            const VmaAllocationCreateInfo allocation_info = {
-                .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
-                         VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-                .usage = VMA_MEMORY_USAGE_AUTO,
-            };
-
-            VmaAllocationInfo memory_info{};
-
-            if (vmaCreateBuffer(
-                ctx.allocator,
-                &buffer_info,
-                &allocation_info,
-                &buffer,
-                &allocation,
-                &memory_info) != VK_SUCCESS) {
-
-                buffer = VK_NULL_HANDLE;
-                allocation = nullptr;
-                memory = nullptr;
-
-                std::cerr << "Failed to create buffer\n";
-                return false;
-            }
-
-            memory = static_cast<T*>(memory_info.pMappedData);
-
-            if (!memory) {
-                std::cerr << "Buffer memory is not mapped\n";
-
-                vmaDestroyBuffer(ctx.allocator, buffer, allocation);
-                buffer = VK_NULL_HANDLE;
-                allocation = nullptr;
-                return false;
-            }
-
-            if (initial_data) {
-                std::memcpy(memory, initial_data, static_cast<size_t>(size));
-
-                if (vmaFlushAllocation(
-                    ctx.allocator, allocation, 0, size) != VK_SUCCESS) {
-
-                    std::cerr << "Failed to flush buffer\n";
-
-                    vmaDestroyBuffer(ctx.allocator, buffer, allocation);
-                    buffer = VK_NULL_HANDLE;
-                    allocation = nullptr;
-                    memory = nullptr;
-                    return false;
-                }
-            }
-
-            return true;
-        }
 
         bool createConeGeometry()
         {
@@ -471,7 +415,7 @@ namespace application {
 
             vk_index_count = static_cast<uint32_t>(indices.size());
 
-            if (!createMappedBuffer(
+            if (!graphics::createMappedBuffer(
                 vertices.size() * sizeof(Vertex),
                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                 vk_vertex_buffer,
@@ -481,7 +425,7 @@ namespace application {
                 return false;
             }
 
-            return createMappedBuffer(
+            return graphics::createMappedBuffer(
                 indices.size() * sizeof(uint32_t),
                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                 vk_index_buffer,
@@ -493,7 +437,7 @@ namespace application {
 
         bool createUniformBuffer()
         {
-            if (!createMappedBuffer(
+            if (!graphics::createMappedBuffer(
                 sizeof(SceneUniforms),
                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                 vk_scene_uniform_buffer,
@@ -503,8 +447,8 @@ namespace application {
             }
 
             for (uint32_t i = 0; i < CONE_COUNT; ++i) {
-                if (!createMappedBuffer(
-                    sizeof(ModelUniforms),
+                if (!graphics::createMappedBuffer(
+                    sizeof(ModelUniform),
                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                     vk_uniform_buffer[i],
                     vk_uniform_buffer_allocation[i],
@@ -543,9 +487,9 @@ namespace application {
 
             const size_t count = lights.empty() ? 1 : lights.size();
             const VkDeviceSize size =
-                sizeof(LightBufferHeader) + VkDeviceSize(count) * sizeof(T);
+                VkDeviceSize(count) * sizeof(T);
 
-            if (!createMappedBuffer(
+            if (!graphics::createMappedBuffer(
                 size,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 storage.buffer,
@@ -557,18 +501,14 @@ namespace application {
             storage.size = size;
             std::memset(storage.memory, 0, static_cast<size_t>(size));
 
-            const LightBufferHeader header = {
-                static_cast<uint32_t>(lights.size()),
-                { 0, 0, 0 }
-            };
-
-            std::memcpy(storage.memory, &header, sizeof(header));
-
-            if (!lights.empty()) {
-                auto* data = static_cast<unsigned char*>(storage.memory)
-                    + sizeof(header);
-
-                std::memcpy(data, lights.data(), lights.size() * sizeof(T));
+            for (size_t i = 0; i < lights.size(); ++i) {
+                T gpu_light = lights[i];
+                for (int component = 0; component < 3; ++component) {
+                    gpu_light.color[component] *= gpu_light.intensity;
+                }
+                auto* destination = static_cast<unsigned char*>(storage.memory)
+                    + i * sizeof(T);
+                std::memcpy(destination, &gpu_light, sizeof(T));
             }
 
             if (vmaFlushAllocation(
@@ -584,8 +524,13 @@ namespace application {
 
         bool createLightStorageBuffers()
         {
-            return createLightStorageBuffer(g_point_lights, g_point_light_buffer)
-                && createLightStorageBuffer(g_spot_lights, g_spot_light_buffer);
+            if (!createLightStorageBuffer(g_point_lights, g_point_light_buffer)
+                || !createLightStorageBuffer(g_spot_lights, g_spot_light_buffer)) {
+                return false;
+            }
+            g_uploaded_point_count = static_cast<uint32_t>(g_point_lights.size());
+            g_uploaded_spot_count = static_cast<uint32_t>(g_spot_lights.size());
+            return true;
         }
 
         bool updateLightStorageBuffers()
@@ -654,6 +599,8 @@ namespace application {
             g_point_light_buffer = new_points;
             g_spot_light_buffer = new_spots;
 
+            g_uploaded_point_count = static_cast<uint32_t>(g_point_lights.size());
+            g_uploaded_spot_count = static_cast<uint32_t>(g_spot_lights.size());
             g_lights_dirty = false;
             return true;
         }
@@ -666,9 +613,10 @@ namespace application {
 
                 if (ImGui::Button("Add point light")) {
                     g_point_lights.push_back({
-                        .position = { 1.5f, -0.5f, -2.0f, 1.0f },
-                        .color_intensity = { 1.0f, 1.0f, 1.0f, 4.0f }
-                    });
+                        .position = { 1.5f, -0.5f, -2.0f },
+                        .color = { 1.0f, 1.0f, 1.0f },
+                        .intensity = 4.0f
+                        });
                     g_lights_dirty = true;
                 }
 
@@ -702,11 +650,11 @@ namespace application {
                         g_lights_dirty = true;
                     }
 
-                    if (ImGui::ColorEdit3("Color", light.color_intensity)) {
+                    if (ImGui::ColorEdit3("Color", light.color)) {
                         g_lights_dirty = true;
                     }
 
-                    if (ImGui::SliderFloat("Intensity", &light.color_intensity[3], 0.0f, 30.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp)) {
+                    if (ImGui::SliderFloat("Intensity", &light.intensity, 0.0f, 30.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp)) {
                         g_lights_dirty = true;
                     }
 
@@ -723,14 +671,12 @@ namespace application {
 
                 if (ImGui::Button("Add spot light")) {
                     g_spot_lights.push_back({
-                        .position = { 1.5f, -0.5f, -2.0f, 1.0f },
-                        .direction = { 0.0f, 0.0f, 1.0f, 0.0f },
-                        .color_intensity = { 1.0f, 1.0f, 1.0f, 4.0f },
-                        .cone_angles = {
-                            std::cos(15.0f * PI / 180.0f),
-                            std::cos(25.0f * PI / 180.0f),
-                            0.0f, 0.0f
-                        }
+                        .position = { 1.5f, -0.5f, -2.0f },
+                        .color = { 1.0f, 1.0f, 1.0f },
+                        .direction = { 0.0f, 0.0f, 1.0f },
+                        .angle = std::cos(15.0f * PI / 180.0f),
+                        .outer_angle = std::cos(25.0f * PI / 180.0f),
+                        .intensity = 4.0f
                         });
 
                     g_lights_dirty = true;
@@ -781,19 +727,19 @@ namespace application {
                         );
                     }
 
-                    if (ImGui::ColorEdit3("Color", light.color_intensity)) {
+                    if (ImGui::ColorEdit3("Color", light.color)) {
                         g_lights_dirty = true;
                     }
 
-                    if (ImGui::SliderFloat("Intensity", &light.color_intensity[3], 0.0f, 30.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp)) {
+                    if (ImGui::SliderFloat("Intensity", &light.intensity, 0.0f, 30.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp)) {
                         g_lights_dirty = true;
                     }
 
                     const float inner_cos = std::fmax(
-                        -1.0f, std::fmin(1.0f, light.cone_angles[0]));
+                        -1.0f, std::fmin(1.0f, light.angle));
 
                     const float outer_cos = std::fmax(
-                        -1.0f, std::fmin(1.0f, light.cone_angles[1]));
+                        -1.0f, std::fmin(1.0f, light.outer_angle));
 
                     float inner_degrees =
                         std::acos(inner_cos) * 180.0f / PI;
@@ -822,10 +768,10 @@ namespace application {
                     }
 
                     if (angles_changed) {
-                        light.cone_angles[0] =
+                        light.angle =
                             std::cos(inner_degrees * PI / 180.0f);
 
-                        light.cone_angles[1] =
+                        light.outer_angle =
                             std::cos(outer_degrees * PI / 180.0f);
 
                         g_lights_dirty = true;
@@ -1019,7 +965,7 @@ namespace application {
                     0,
                     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                     vk_uniform_buffer[i],
-                    sizeof(ModelUniforms)
+                    sizeof(ModelUniform)
                 );
             }
 
@@ -1218,14 +1164,14 @@ namespace application {
 
         for (auto& cone : g_cones) mat4_identity(cone.g_model);
         g_cones[1].g_position[0] = -1.25f;
-        g_cones[1].g_tint[0] = 1.0f;
-        g_cones[1].g_tint[1] = 0.4f;
-        g_cones[1].g_tint[2] = 0.4f;
+        g_cones[1].g_albedo[0] = 1.0f;
+        g_cones[1].g_albedo[1] = 0.4f;
+        g_cones[1].g_albedo[2] = 0.4f;
         g_cones[1].g_anim_playing = false;
         g_cones[2].g_position[2] = 0.75f;
-        g_cones[2].g_tint[0] = 0.4f;
-        g_cones[2].g_tint[1] = 0.6f;
-        g_cones[2].g_tint[2] = 1.0f;
+        g_cones[2].g_albedo[0] = 0.4f;
+        g_cones[2].g_albedo[1] = 0.6f;
+        g_cones[2].g_albedo[2] = 1.0f;
         g_cones[2].g_anim_playing = false;
         updateCamera();
 
@@ -1360,11 +1306,11 @@ namespace application {
 
         ImGui::SeparatorText("Material");
 
-        ImGui::ColorEdit3("Albedo multiplier", selected.g_tint);
+        ImGui::ColorEdit3("Albedo multiplier", selected.g_albedo);
 
         ImGui::ColorEdit3("Specular color", selected.g_specular_color);
 
-        ImGui::SliderFloat("Shininess", &selected.g_shininess, 1.0f, 256.0f);
+        ImGui::SliderFloat("Alpha (shininess)", &selected.g_alpha, 1.0f, 256.0f);
 
         ImGui::End();
 
@@ -1388,11 +1334,11 @@ namespace application {
 
             const float anim_rot_y = t * cone.g_anim_rot_speed;
 
-            mat4_rotation_x( cone.g_rotation_degrees[0] * PI / 180.0f, Rx);
+            mat4_rotation_x(cone.g_rotation_degrees[0] * PI / 180.0f, Rx);
 
-            mat4_rotation_y( cone.g_rotation_degrees[1] * PI / 180.0f + anim_rot_y, Ry);
+            mat4_rotation_y(cone.g_rotation_degrees[1] * PI / 180.0f + anim_rot_y, Ry);
 
-            mat4_rotation_z( cone.g_rotation_degrees[2] * PI / 180.0f, Rz);
+            mat4_rotation_z(cone.g_rotation_degrees[2] * PI / 180.0f, Rz);
 
             mat4_multiply(Ry, Rx, tmp1);
             mat4_multiply(tmp1, Rz, R);
@@ -1432,20 +1378,18 @@ namespace application {
             scene.camera_position[component] =
                 g_camera.position[component];
 
-            scene.light_direction[component] =
+            scene.directional_light_direction[component] =
                 g_light_direction[component];
 
-            scene.light_color_intensity[component] =
-                g_light_color[component];
+            scene.directional_light_color[component] =
+                g_light_color[component] * g_light_intensity;
 
-            scene.ambient_color_intensity[component] =
-                g_ambient_color[component];
+            scene.ambient_light[component] =
+                g_ambient_color[component] * g_ambient_intensity;
         }
 
-        scene.camera_position[3] = 1.0f;
-        scene.light_direction[3] = 0.0f;
-        scene.light_color_intensity[3] = g_light_intensity;
-        scene.ambient_color_intensity[3] = g_ambient_intensity;
+        scene.point_light_count = g_uploaded_point_count;
+        scene.spot_light_count = g_uploaded_spot_count;
 
         if (vmaFlushAllocation(
             ctx.allocator,
@@ -1465,23 +1409,23 @@ namespace application {
             );
 
             memcpy(
-                model.tint,
-                g_cones[i].g_tint,
-                sizeof(model.tint)
+                model.albedo,
+                g_cones[i].g_albedo,
+                sizeof(model.albedo)
             );
 
             for (int component = 0; component < 3; ++component) {
-                model.specular_shininess[component] =
+                model.specular[component] =
                     g_cones[i].g_specular_color[component];
             }
 
-            model.specular_shininess[3] = g_cones[i].g_shininess;
+            model.alpha = g_cones[i].g_alpha;
 
             if (vmaFlushAllocation(
                 ctx.allocator,
                 vk_uniform_buffer_allocation[i],
                 0,
-                sizeof(ModelUniforms)) != VK_SUCCESS) {
+                sizeof(ModelUniform)) != VK_SUCCESS) {
                 std::cerr << "Failed to flush model uniform buffer\n";
             }
         }
