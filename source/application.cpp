@@ -61,7 +61,7 @@ namespace application {
             alignas(16) float position[3];
             alignas(16) float color[3];
             alignas(16) float direction[3];
-            float angle;
+            float angle; 
             float outer_angle;
             float intensity;
         };
@@ -132,6 +132,25 @@ namespace application {
 
         VkShaderModule vk_vertex_shader = VK_NULL_HANDLE;
         VkShaderModule vk_fragment_shader = VK_NULL_HANDLE;
+
+        VkBuffer vk_marker_buffer = VK_NULL_HANDLE;
+        VmaAllocation vk_marker_allocation = nullptr;
+        Vertex* vk_marker_memory = nullptr;
+        uint32_t g_marker_cube_count = 0;
+        uint32_t g_marker_line_count = 0;
+        VkPipeline vk_marker_line_pipeline = VK_NULL_HANDLE;
+
+        struct MarkerPushConstants {
+            float mvp[4][4];
+            float color[4];
+        };
+        static_assert(sizeof(MarkerPushConstants) == 80);
+        static_assert(offsetof(MarkerPushConstants, color) == 64);
+
+        bool g_show_light_markers = true;
+        bool g_show_spot_cones = true;
+        float g_marker_size = 0.12f;
+        float g_spot_visual_length = 1.5f;
 
         float g_view[4][4];
 
@@ -433,6 +452,130 @@ namespace application {
                 vk_index_buffer_memory,
                 indices.data()
             );
+        }
+
+        bool createLightMarkerGeometry()
+        {
+            std::vector<Vertex> vertices;
+            const float corners[8][3] = {
+                {-0.5f, -0.5f, -0.5f}, { 0.5f, -0.5f, -0.5f},
+                { 0.5f,  0.5f, -0.5f}, {-0.5f,  0.5f, -0.5f},
+                {-0.5f, -0.5f,  0.5f}, { 0.5f, -0.5f,  0.5f},
+                { 0.5f,  0.5f,  0.5f}, {-0.5f,  0.5f,  0.5f}
+            };
+            const uint32_t triangles[] = {
+                0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6,
+                0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7,
+                0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2
+            };
+            auto add_vertex = [&](float x, float y, float z) {
+                Vertex vertex{};
+                vertex.position[0] = x;
+                vertex.position[1] = y;
+                vertex.position[2] = z;
+                vertices.push_back(vertex);
+                };
+            for (uint32_t index : triangles) {
+                add_vertex(corners[index][0], corners[index][1], corners[index][2]);
+            }
+            g_marker_cube_count = static_cast<uint32_t>(vertices.size());
+
+            constexpr uint32_t segments = 32;
+            for (uint32_t i = 0; i < segments; ++i) {
+                const float a = 2.0f * PI * float(i) / float(segments);
+                const float b = 2.0f * PI * float(i + 1) / float(segments);
+                add_vertex(std::cos(a), std::sin(a), 1.0f);
+                add_vertex(std::cos(b), std::sin(b), 1.0f);
+                if (i % 8 == 0) {
+                    add_vertex(0.0f, 0.0f, 0.0f);
+                    add_vertex(std::cos(a), std::sin(a), 1.0f);
+                }
+            }
+            add_vertex(0.0f, 0.0f, 0.0f);
+            add_vertex(0.0f, 0.0f, 1.0f);
+            g_marker_line_count = static_cast<uint32_t>(vertices.size()) - g_marker_cube_count;
+
+            return graphics::createMappedBuffer(
+                vertices.size() * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                vk_marker_buffer, vk_marker_allocation, vk_marker_memory, vertices.data());
+        }
+
+        bool makeSpotMarkerMatrix(const SpotLight& light, float model[4][4])
+        {
+            const float length_squared = light.direction[0] * light.direction[0]
+                + light.direction[1] * light.direction[1]
+                + light.direction[2] * light.direction[2];
+            if (length_squared < 0.00000001f) return false;
+
+            float forward[3];
+            for (int i = 0; i < 3; ++i) {
+                forward[i] = light.direction[i] / std::sqrt(length_squared);
+            }
+            float reference[3] = { 0.0f, 1.0f, 0.0f };
+            if (std::fabs(forward[1]) > 0.99f) {
+                reference[0] = 1.0f;
+                reference[1] = 0.0f;
+            }
+            auto cross = [](const float a[3], const float b[3], float out[3]) {
+                out[0] = a[1] * b[2] - a[2] * b[1];
+                out[1] = a[2] * b[0] - a[0] * b[2];
+                out[2] = a[0] * b[1] - a[1] * b[0];
+                };
+            float right[3], up[3];
+            cross(reference, forward, right);
+            const float right_length = std::sqrt(
+                right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+            for (float& component : right) component /= right_length;
+            cross(forward, right, up);
+
+            const float outer_cos = std::fmax(0.0001f, std::fmin(1.0f, light.outer_angle));
+            const float radius = g_spot_visual_length * std::sqrt(1.0f - outer_cos * outer_cos) / outer_cos;
+            mat4_identity(model);
+            for (int i = 0; i < 3; ++i) {
+                model[0][i] = right[i] * radius;
+                model[1][i] = up[i] * radius;
+                model[2][i] = forward[i] * g_spot_visual_length;
+                model[3][i] = light.position[i];
+            }
+            return true;
+        }
+
+        void drawLightMarkers(VkCommandBuffer command_buffer)
+        {
+            if (!g_show_light_markers && !g_show_spot_cones) return;
+            const VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(command_buffer, 0, 1, &vk_marker_buffer, &offset);
+            auto draw = [&](const float model[4][4], const float color[3],
+                uint32_t count, uint32_t first_vertex) {
+                    MarkerPushConstants data{};
+                    mat4_multiply(vk_scene_uniform_memory->view_projection, model, data.mvp);
+                    for (int i = 0; i < 3; ++i) data.color[i] = color[i];
+                    data.color[3] = 1.0f;
+                    vkCmdPushConstants(command_buffer, vk_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(data), &data);
+                    vkCmdDraw(command_buffer, count, 1, first_vertex, 0);
+                };
+            if (g_show_light_markers) {
+                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
+                auto draw_cube = [&](const auto& light) {
+                    float model[4][4];
+                    mat4_scale(g_marker_size, g_marker_size, g_marker_size, model);
+                    for (int i = 0; i < 3; ++i) model[3][i] = light.position[i];
+                    draw(model, light.color, g_marker_cube_count, 0);
+                    };
+                for (const auto& light : g_point_lights) draw_cube(light);
+                for (const auto& light : g_spot_lights) draw_cube(light);
+            }
+            if (g_show_spot_cones) {
+                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_marker_line_pipeline);
+                const float white[3] = { 1.0f, 1.0f, 1.0f };
+                for (const auto& light : g_spot_lights) {
+                    float model[4][4];
+                    if (makeSpotMarkerMatrix(light, model)) {
+                        draw(model, white, g_marker_line_count, g_marker_cube_count);
+                    }
+                }
+            }
         }
 
         bool createUniformBuffer()
@@ -1056,7 +1199,7 @@ namespace application {
                 .pVertexAttributeDescriptions = vertex_attributes,
             };
 
-            const VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+            VkPipelineInputAssemblyStateCreateInfo input_assembly = {
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
                 .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             };
@@ -1080,7 +1223,7 @@ namespace application {
                 .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
             };
 
-            const VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+            VkPipelineDepthStencilStateCreateInfo depth_stencil = {
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
                 .depthTestEnable = VK_TRUE,
                 .depthWriteEnable = VK_TRUE,
@@ -1112,10 +1255,18 @@ namespace application {
                 vk_model_set_layout,
             };
 
+            const VkPushConstantRange push_range = {
+                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                .offset = 0,
+                .size = sizeof(MarkerPushConstants),
+            };
+
             const VkPipelineLayoutCreateInfo layout_info = {
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
                 .setLayoutCount = 2,
                 .pSetLayouts = set_layouts,
+                .pushConstantRangeCount = 1,
+                .pPushConstantRanges = &push_range,
             };
             if (vkCreatePipelineLayout(ctx.device, &layout_info, nullptr,
                 &vk_pipeline_layout) != VK_SUCCESS) {
@@ -1146,6 +1297,11 @@ namespace application {
                 return false;
             }
 
+            input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+            depth_stencil.depthWriteEnable = VK_FALSE;
+            if (vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &pipeline_info,
+                nullptr, &vk_marker_line_pipeline) != VK_SUCCESS) return false;
+
             return true;
         }
 
@@ -1154,6 +1310,7 @@ namespace application {
     bool initialize()
     {
         if (!createConeGeometry() ||
+            !createLightMarkerGeometry() ||
             !createUniformBuffer() ||
             !createLightStorageBuffers() ||
             !createDescriptorSet() ||
@@ -1184,6 +1341,15 @@ namespace application {
     {
         auto& ctx = graphics::internal::context;
         vkQueueWaitIdle(ctx.graphics_queue);
+
+        vkDestroyPipeline(ctx.device, vk_marker_line_pipeline, nullptr);
+        vk_marker_line_pipeline = VK_NULL_HANDLE;
+        if (vk_marker_buffer) {
+            vmaDestroyBuffer(ctx.allocator, vk_marker_buffer, vk_marker_allocation);
+            vk_marker_buffer = VK_NULL_HANDLE;
+            vk_marker_allocation = nullptr;
+            vk_marker_memory = nullptr;
+        }
 
         vkDestroyPipeline(ctx.device, vk_pipeline, nullptr);
         vkDestroyPipelineLayout(ctx.device, vk_pipeline_layout, nullptr);
@@ -1252,6 +1418,14 @@ namespace application {
         ImGui::SliderFloat("Ambient intensity", &g_ambient_intensity, 0.0f, 1.0f);
 
         drawLightControls();
+
+        ImGui::SeparatorText("Light visualization");
+        ImGui::Checkbox("Show light markers", &g_show_light_markers);
+        ImGui::Checkbox("Show spot cones", &g_show_spot_cones);
+        ImGui::SliderFloat("Marker size", &g_marker_size, 0.03f, 0.3f,
+            "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SliderFloat("Cone display length", &g_spot_visual_length, 0.1f, 5.0f,
+            "%.2f", ImGuiSliderFlags_AlwaysClamp);
 
         ImGui::TextUnformatted("Select cone:");
         ImGui::RadioButton("Cone 1", &g_selected_cone, 0);
@@ -1467,6 +1641,11 @@ namespace application {
 
         vkCmdBindPipeline(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
 
+        const MarkerPushConstants model_mode{};
+        vkCmdPushConstants(fd.command_buffer, vk_pipeline_layout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0, sizeof(model_mode), &model_mode);
+
         const VkDeviceSize vertex_offset = 0;
         vkCmdBindVertexBuffers(fd.command_buffer, 0, 1, &vk_vertex_buffer, &vertex_offset);
         vkCmdBindIndexBuffer(fd.command_buffer, vk_index_buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -1502,6 +1681,8 @@ namespace application {
                 0
             );
         }
+
+        drawLightMarkers(fd.command_buffer);
 
         vkCmdEndRenderPass(fd.command_buffer);
         vkEndCommandBuffer(fd.command_buffer);

@@ -25,13 +25,33 @@ layout(std140, set = 1, binding = 0) uniform ModelUniform {
     float alpha;
 } model_uniforms;
 
+layout(push_constant) uniform DrawData {
+    mat4 mvp;
+    vec4 color;
+} draw_data;
+
 void main()
 {
-    vec4 world_position = model_uniforms.model * vec4(in_position, 1.0);
-    mat3 normal_matrix = transpose(inverse(mat3(model_uniforms.model)));
+    if (draw_data.color.w > 0.5) {
+        gl_Position = draw_data.mvp * vec4(in_position, 1.0);
+
+        out_world_position = vec3(0.0);
+        out_world_normal = vec3(0.0);
+        out_color = draw_data.color.rgb;
+
+        return;
+    }
+
+    vec4 world_position =
+        model_uniforms.model * vec4(in_position, 1.0);
+
+    mat3 normal_matrix =
+        transpose(inverse(mat3(model_uniforms.model)));
 
     out_world_position = world_position.xyz;
     out_world_normal = normal_matrix * in_normal;
     out_color = in_color;
-    gl_Position = scene_uniforms.view_projection * world_position;
+
+    gl_Position =
+        scene_uniforms.view_projection * world_position;
 }
