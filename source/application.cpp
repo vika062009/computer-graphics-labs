@@ -2,35 +2,40 @@
 #include "graphics.hpp"
 
 #include <imgui.h>
-#include <vulkan/vulkan.h>
 
 #include <cmath>
-#include <cstdint>
 #include <cstddef>
-#include <cstdio>
+#include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <vector>
 
-#include <vk_mem_alloc.h>
-
 namespace application {
-
     namespace {
 
         constexpr uint32_t CONE_COUNT = 3;
-
         constexpr uint32_t CONE_SEGMENTS = 50;
         constexpr float CONE_RADIUS = 0.5f;
         constexpr float CONE_HEIGHT = 1.0f;
         constexpr float PI = 3.14159265358979323846f;
 
-        constexpr const char* VERT_SHADER_PATH = "../shaders/cone.vert.spv";
-        constexpr const char* FRAG_SHADER_PATH = "../shaders/cone.frag.spv";
+        constexpr uint32_t MATERIAL_COUNT = 3;
+        constexpr uint32_t BARS = 1;
+
+        constexpr const char* texture_files[MATERIAL_COUNT] = {
+            "../textures/lena.png",
+            "../textures/bars.png",
+            "../textures/elina.png"
+        };
+
+        const char* const material_names[MATERIAL_COUNT] = {
+            "Lena", "Bars", "Elina"
+        };
 
         struct Vertex {
             float position[3];
-            float color[3];
+            float uv[2];
             float normal[3];
         };
 
@@ -49,6 +54,7 @@ namespace application {
             alignas(16) float albedo[3];
             alignas(16) float specular[3];
             float alpha;
+            alignas(16) uint32_t unlit;
         };
 
         struct alignas(16) PointLight {
@@ -61,184 +67,125 @@ namespace application {
             alignas(16) float position[3];
             alignas(16) float color[3];
             alignas(16) float direction[3];
-            float angle; 
+            float angle;
             float outer_angle;
             float intensity;
         };
 
+        struct TextureEffect {
+            uint32_t enabled;
+            float time;
+        };
+
         static_assert(sizeof(SceneUniforms) == 144);
-        static_assert(offsetof(SceneUniforms, camera_position) == 64);
-        static_assert(offsetof(SceneUniforms, directional_light_direction) == 80);
-        static_assert(offsetof(SceneUniforms, directional_light_color) == 96);
-        static_assert(offsetof(SceneUniforms, ambient_light) == 112);
         static_assert(offsetof(SceneUniforms, point_light_count) == 124);
         static_assert(offsetof(SceneUniforms, spot_light_count) == 128);
-        static_assert(sizeof(ModelUniform) == 96);
-        static_assert(offsetof(ModelUniform, albedo) == 64);
-        static_assert(offsetof(ModelUniform, specular) == 80);
+        static_assert(sizeof(ModelUniform) == 112);
         static_assert(offsetof(ModelUniform, alpha) == 92);
+        static_assert(offsetof(ModelUniform, unlit) == 96);
         static_assert(sizeof(PointLight) == 32);
-        static_assert(offsetof(PointLight, color) == 16);
         static_assert(sizeof(SpotLight) == 64);
-        static_assert(offsetof(SpotLight, color) == 16);
-        static_assert(offsetof(SpotLight, direction) == 32);
         static_assert(offsetof(SpotLight, angle) == 44);
         static_assert(offsetof(SpotLight, outer_angle) == 48);
+        static_assert(sizeof(TextureEffect) == 8);
+        static_assert(offsetof(TextureEffect, time) == 4);
 
-        std::vector<PointLight> g_point_lights;
-        std::vector<SpotLight> g_spot_lights;
-
-        struct LightStorageBuffer {
-            VkBuffer buffer = VK_NULL_HANDLE;
-            VmaAllocation allocation = nullptr;
-            void* memory = nullptr;
-            VkDeviceSize size = 0;
+        struct Buffer {
+            VkBuffer buffer{};
+            VmaAllocation allocation{};
+            void* memory{};
+            VkDeviceSize size{};
         };
-
-        LightStorageBuffer g_point_light_buffer;
-        LightStorageBuffer g_spot_light_buffer;
-
-        bool g_lights_dirty = false;
-        uint32_t g_uploaded_point_count = 0;
-        uint32_t g_uploaded_spot_count = 0;
-
-        VkBuffer vk_vertex_buffer = VK_NULL_HANDLE;
-        VmaAllocation vk_vertex_buffer_allocation = VK_NULL_HANDLE;
-        Vertex* vk_vertex_buffer_memory = nullptr;
-
-        VkBuffer vk_index_buffer = VK_NULL_HANDLE;
-        VmaAllocation vk_index_buffer_allocation = VK_NULL_HANDLE;
-        uint32_t* vk_index_buffer_memory = nullptr;
-        uint32_t vk_index_count = 0;
-
-        VkBuffer vk_scene_uniform_buffer = VK_NULL_HANDLE;
-        VmaAllocation vk_scene_uniform_allocation = nullptr;
-        SceneUniforms* vk_scene_uniform_memory = nullptr;
-
-        VkBuffer vk_uniform_buffer[CONE_COUNT] = {};
-        VmaAllocation vk_uniform_buffer_allocation[CONE_COUNT] = {};
-        ModelUniform* vk_uniform_buffer_memory[CONE_COUNT] = {};
-
-        VkDescriptorSetLayout vk_scene_set_layout = VK_NULL_HANDLE;
-        VkDescriptorSet vk_scene_descriptor_set = VK_NULL_HANDLE;
-
-        VkDescriptorSetLayout vk_model_set_layout = VK_NULL_HANDLE;
-        VkDescriptorSet vk_descriptor_set[CONE_COUNT] = {};
-
-        VkDescriptorPool vk_descriptor_pool = VK_NULL_HANDLE;
-
-        VkPipelineLayout vk_pipeline_layout = VK_NULL_HANDLE;
-        VkPipeline vk_pipeline = VK_NULL_HANDLE;
-
-        VkShaderModule vk_vertex_shader = VK_NULL_HANDLE;
-        VkShaderModule vk_fragment_shader = VK_NULL_HANDLE;
-
-        VkBuffer vk_marker_buffer = VK_NULL_HANDLE;
-        VmaAllocation vk_marker_allocation = nullptr;
-        Vertex* vk_marker_memory = nullptr;
-        uint32_t g_marker_cube_count = 0;
-        uint32_t g_marker_line_count = 0;
-        VkPipeline vk_marker_line_pipeline = VK_NULL_HANDLE;
-
-        struct MarkerPushConstants {
-            float mvp[4][4];
-            float color[4];
-        };
-        static_assert(sizeof(MarkerPushConstants) == 80);
-        static_assert(offsetof(MarkerPushConstants, color) == 64);
-
-        bool g_show_light_markers = true;
-        bool g_show_spot_cones = true;
-        float g_marker_size = 0.12f;
-        float g_spot_visual_length = 1.5f;
-
-        float g_view[4][4];
-
-        enum class ProjectionMode { Perspective, Orthographic };
 
         struct CameraState {
-            float position[3] = { 0.0f, 0.0f, -3.0f };
-            float rotation_degrees[3] = { 0.0f, 0.0f, 0.0f };
-
-            ProjectionMode projection_mode = ProjectionMode::Perspective;
-            float fov_degrees = 60.0f;
+            float position[3] = { 0, 0, -3 };
+            float rotation_degrees[3]{};
+            int projection_mode = 0;
+            float fov_degrees = 60;
             float ortho_scale = 1.5f;
-
-            float projection[4][4] = {};
+            float projection[4][4]{};
         };
-
-        CameraState g_camera;
-
-        float g_light_direction[3] = { -0.5f, 1.0f, 1.0f };
-        float g_light_color[3] = { 1.0f, 1.0f, 1.0f };
-        float g_light_intensity = 1.0f;
-
-        float g_ambient_color[3] = { 1.0f, 1.0f, 1.0f };
-        float g_ambient_intensity = 0.15f;
 
         struct ConeState {
-            float g_position[3] = { 0.0f, 0.0f, 0.0f };
-            float g_rotation_degrees[3] = { 0.0f, 0.0f, 0.0f };
-            float g_scale[3] = { 1.0f, 1.0f, 1.0f };
+            float position[3]{};
+            float rotation_degrees[3]{};
+            float scale[3] = { 1, 1, 1 };
 
-            bool  g_anim_playing = true;
-            float g_anim_speed = 1.0f;
-            float g_anim_radius = 1.5f;
-            float g_anim_height = 0.0f;
-            float g_anim_rot_speed = 1.0f;
-            float g_anim_time = 0.0f;
+            bool playing = true;
+            float speed = 1;
+            float radius = 1.5f;
+            float height = 0;
+            float rotation_speed = 1;
+            float anim_time = 0;
 
-            float g_albedo[3] = { 1.0f, 1.0f, 1.0f };
+            float albedo[3] = { 1, 1, 1 };
+            float specular[3] = { 0.25f, 0.25f, 0.25f };
+            float alpha = 32;
+            float model[4][4]{};
 
-            float g_specular_color[3] = { 0.25f, 0.25f, 0.25f };
-            float g_alpha = 32.0f;
-
-            float g_model[4][4] = {};
+            int material = 0;
+            bool texture_effect = false;
         };
-        ConeState g_cones[CONE_COUNT];
-        int g_selected_cone = 0;
 
-        double g_last_time = 0.0;
+        auto& ctx = graphics::internal::context;
 
+        CameraState camera;
+        ConeState cones[CONE_COUNT];
+        int selected_cone = 0;
+        double last_time = 0;
+        float view[4][4]{};
 
+        float light_direction[3] = { -0.5f, 1, 1 };
+        float light_color[3] = { 1, 1, 1 };
+        float light_intensity = 1;
+        float ambient_color[3] = { 1, 1, 1 };
+        float ambient_intensity = 0.15f;
+
+        std::vector<PointLight> point_lights;
+        std::vector<SpotLight> spot_lights;
+        bool lights_dirty = false;
+        uint32_t uploaded_points = 0;
+        uint32_t uploaded_spots = 0;
+
+        bool show_markers = true;
+        bool show_spot_cones = true;
+        float marker_size = 0.12f;
+        float spot_visual_length = 1.5f;
+
+        Buffer vertex_buffer, index_buffer, marker_buffer;
+        Buffer scene_buffer, model_buffer, point_buffer, spot_buffer;
+        uint32_t index_count = 0;
+        uint32_t cube_vertex_count = 0;
+        uint32_t line_vertex_count = 0;
+        VkDeviceSize model_stride = 0;
+        size_t model_capacity = 0;
+
+        graphics::Texture textures[MATERIAL_COUNT]{};
+        graphics::Texture black{}, eyes{}, glow{};
+
+        VkDescriptorSetLayout scene_layout{}, model_layout{};
+        VkDescriptorSet scene_set{};
+        VkDescriptorSet material_sets[MATERIAL_COUNT]{};
+        VkDescriptorPool descriptor_pool{};
+        VkPipelineLayout pipeline_layout{};
+        VkPipeline pipeline{}, line_pipeline{};
+        VkShaderModule vertex_shader{}, fragment_shader{};
+
+        // Матрицы хранятся как [столбец][строка].
         void mat4_identity(float m[4][4])
         {
-            memset(m, 0, sizeof(float) * 16);
-            m[0][0] = m[1][1] = m[2][2] = m[3][3] = 1.0f;
+            std::memset(m, 0, sizeof(float) * 16);
+            m[0][0] = m[1][1] = m[2][2] = m[3][3] = 1;
         }
 
         void mat4_multiply(const float a[4][4], const float b[4][4], float out[4][4])
         {
-            float r[4][4] = {};
+            float r[4][4]{};
             for (int i = 0; i < 4; ++i)
                 for (int j = 0; j < 4; ++j)
                     for (int k = 0; k < 4; ++k)
                         r[i][j] += a[k][j] * b[i][k];
-            memcpy(out, r, sizeof(r));
-        }
-
-        void mat4_perspective(float fov_y, float aspect, float znear, float zfar, float m[4][4])
-        {
-            memset(m, 0, sizeof(float) * 16);
-            const float tan_half = tanf(fov_y * 0.5f);
-            m[0][0] = 1.0f / (aspect * tan_half);
-            m[1][1] = 1.0f / tan_half;
-            m[2][2] = zfar / (zfar - znear);
-            m[2][3] = 1.0f;
-            m[3][2] = -(zfar * znear) / (zfar - znear);
-        }
-
-        void mat4_ortho(float left, float right, float bottom, float top,
-            float znear, float zfar, float m[4][4])
-        {
-            memset(m, 0, sizeof(float) * 16);
-            m[0][0] = 2.0f / (right - left);
-            m[1][1] = 2.0f / (bottom - top);
-            m[2][2] = 1.0f / (zfar - znear);
-            m[3][0] = -(right + left) / (right - left);
-            m[3][1] = -(top + bottom) / (bottom - top);
-            m[3][2] = -znear / (zfar - znear);
-            m[3][3] = 1.0f;
+            std::memcpy(out, r, sizeof(r));
         }
 
         void mat4_translation(float x, float y, float z, float m[4][4])
@@ -257,1435 +204,863 @@ namespace application {
             m[2][2] = z;
         }
 
-        void mat4_rotation_x(float angle, float m[4][4])
+        void mat4_rotation_x(float a, float m[4][4])
         {
             mat4_identity(m);
-            const float c = cosf(angle), s = sinf(angle);
-            m[1][1] = c;  m[2][1] = -s;
-            m[1][2] = s;  m[2][2] = c;
+            const float c = std::cos(a), s = std::sin(a);
+            m[1][1] = c; m[2][1] = -s;
+            m[1][2] = s; m[2][2] = c;
         }
 
-        void mat4_rotation_y(float angle, float m[4][4])
+        void mat4_rotation_y(float a, float m[4][4])
         {
             mat4_identity(m);
-            const float c = cosf(angle), s = sinf(angle);
+            const float c = std::cos(a), s = std::sin(a);
             m[0][0] = c;  m[2][0] = s;
             m[0][2] = -s; m[2][2] = c;
         }
 
-        void mat4_rotation_z(float angle, float m[4][4])
+        void mat4_rotation_z(float a, float m[4][4])
         {
             mat4_identity(m);
-            const float c = cosf(angle), s = sinf(angle);
-            m[0][0] = c;  m[1][0] = -s;
-            m[0][1] = s;  m[1][1] = c;
+            const float c = std::cos(a), s = std::sin(a);
+            m[0][0] = c; m[1][0] = -s;
+            m[0][1] = s; m[1][1] = c;
+        }
+
+        float radians(float degrees)
+        {
+            return degrees * PI / 180.0f;
         }
 
         void updateCamera()
         {
-            float Rx[4][4], Ry[4][4], Rz[4][4];
-            float T[4][4], tmp[4][4], inverse_rotation[4][4];
+            float rx[4][4], ry[4][4], rz[4][4], t[4][4], tmp[4][4];
 
-            mat4_rotation_x(
-                -g_camera.rotation_degrees[0] * PI / 180.0f, Rx);
+            mat4_rotation_x(-radians(camera.rotation_degrees[0]), rx);
+            mat4_rotation_y(-radians(camera.rotation_degrees[1]), ry);
+            mat4_rotation_z(-radians(camera.rotation_degrees[2]), rz);
+            mat4_translation(-camera.position[0], -camera.position[1], -camera.position[2], t);
 
-            mat4_rotation_y(
-                -g_camera.rotation_degrees[1] * PI / 180.0f, Ry);
+            mat4_multiply(rx, ry, tmp);
+            mat4_multiply(rz, tmp, tmp);
+            mat4_multiply(tmp, t, view);
 
-            mat4_rotation_z(
-                -g_camera.rotation_degrees[2] * PI / 180.0f, Rz);
+            const auto extent = ctx.swapchain_extent;
+            if (!extent.width || !extent.height) return;
 
-            mat4_multiply(Rx, Ry, tmp);
-            mat4_multiply(Rz, tmp, inverse_rotation);
+            const float aspect = float(extent.width) / float(extent.height);
+            constexpr float n = 0.1f, f = 100.0f;
+            auto& p = camera.projection;
+            std::memset(p, 0, sizeof(p));
 
-            mat4_translation(
-                -g_camera.position[0],
-                -g_camera.position[1],
-                -g_camera.position[2],
-                T
-            );
-
-            mat4_multiply(inverse_rotation, T, g_view);
-
-            const auto& extent = graphics::internal::context.swapchain_extent;
-
-            if (extent.width == 0 || extent.height == 0) {
-                return;
-            }
-
-            const float aspect =
-                static_cast<float>(extent.width) /
-                static_cast<float>(extent.height);
-
-            if (g_camera.projection_mode == ProjectionMode::Perspective) {
-                mat4_perspective(
-                    g_camera.fov_degrees * PI / 180.0f,
-                    aspect,
-                    0.1f,
-                    100.0f,
-                    g_camera.projection
-                );
+            if (camera.projection_mode == 0) {
+                const float h = std::tan(radians(camera.fov_degrees) * 0.5f);
+                p[0][0] = 1 / (aspect * h);
+                p[1][1] = 1 / h;
+                p[2][2] = f / (f - n);
+                p[2][3] = 1;
+                p[3][2] = -f * n / (f - n);
             }
             else {
-                const float half_h = g_camera.ortho_scale;
-                const float half_w = half_h * aspect;
-
-                mat4_ortho(
-                    -half_w,
-                    half_w,
-                    half_h,
-                    -half_h,
-                    0.1f,
-                    100.0f,
-                    g_camera.projection
-                );
+                p[0][0] = 1 / (camera.ortho_scale * aspect);
+                p[1][1] = 1 / camera.ortho_scale;
+                p[2][2] = 1 / (f - n);
+                p[3][2] = -n / (f - n);
+                p[3][3] = 1;
             }
         }
 
+        void updateCone(ConeState& c, float dt)
+        {
+            if (c.playing) c.anim_time += dt * c.speed;
+            const float a = c.anim_time;
+            float t[4][4], s[4][4], rx[4][4], ry[4][4], rz[4][4], tmp[4][4];
+
+            mat4_translation(c.position[0] + c.radius * std::cos(a),
+                c.position[1] + c.height,
+                c.position[2] + c.radius * std::sin(a), t);
+            mat4_rotation_x(radians(c.rotation_degrees[0]), rx);
+            mat4_rotation_y(radians(c.rotation_degrees[1]) + a * c.rotation_speed, ry);
+            mat4_rotation_z(radians(c.rotation_degrees[2]), rz);
+            mat4_scale(c.scale[0], c.scale[1], c.scale[2], s);
+
+            mat4_multiply(ry, rx, tmp);
+            mat4_multiply(tmp, rz, tmp);
+            mat4_multiply(tmp, s, tmp);
+            mat4_multiply(t, tmp, c.model);
+        }
+
+        void destroyBuffer(Buffer& b)
+        {
+            if (b.buffer) vmaDestroyBuffer(ctx.allocator, b.buffer, b.allocation);
+            b = {};
+        }
+
+        bool createMapped(Buffer& b, VkDeviceSize size, VkBufferUsageFlags usage)
+        {
+            if (!graphics::createMappedBuffer(size, usage, b.buffer, b.allocation, b.memory))
+                return false;
+            b.size = size;
+            return true;
+        }
 
         bool createConeGeometry()
         {
             std::vector<Vertex> vertices;
             std::vector<uint32_t> indices;
+            const float h = CONE_HEIGHT, r = CONE_RADIUS;
+            const float len = std::sqrt(h * h + r * r);
 
-            const float normal_length = std::sqrt(
-                CONE_HEIGHT * CONE_HEIGHT +
-                CONE_RADIUS * CONE_RADIUS
-            );
-
-            for (uint32_t i = 0; i < CONE_SEGMENTS; ++i) {
-                const float angle =
-                    2.0f * PI * float(i) / float(CONE_SEGMENTS);
-
-                const float c = std::cos(angle);
-                const float s = std::sin(angle);
-
-                Vertex v{};
-
-                v.position[0] = CONE_RADIUS * c;
-                v.position[2] = CONE_RADIUS * s;
-
-                v.color[0] = c * 0.5f + 0.5f;
-                v.color[2] = s * 0.5f + 0.5f;
-
-                v.normal[0] = CONE_HEIGHT * c / normal_length;
-                v.normal[1] = -CONE_RADIUS / normal_length;
-                v.normal[2] = CONE_HEIGHT * s / normal_length;
-
-                vertices.push_back(v);
+            for (uint32_t i = 0; i <= CONE_SEGMENTS; ++i) {
+                const float u = float(i) / CONE_SEGMENTS;
+                const float a = 2 * PI * float(i % CONE_SEGMENTS) / CONE_SEGMENTS;
+                const float c = std::cos(a), s = std::sin(a);
+                vertices.push_back({ {r * c, 0, r * s}, {u, 1}, {h * c / len, -r / len, h * s / len} });
             }
 
-            const uint32_t apex_start =
-                static_cast<uint32_t>(vertices.size());
+            const uint32_t apex = static_cast<uint32_t>(vertices.size());
+            for (uint32_t i = 0; i < CONE_SEGMENTS; ++i)
+                vertices.push_back({ {0, -h, 0}, {(float(i) + 0.5f) / CONE_SEGMENTS, 0}, {0,-1,0} });
+
+            const uint32_t center = static_cast<uint32_t>(vertices.size());
+            vertices.push_back({ {0,0,0}, {0.5f,0.5f}, {0,1,0} });
+            const uint32_t base = center + 1;
 
             for (uint32_t i = 0; i < CONE_SEGMENTS; ++i) {
-                vertices.push_back({
-                    { 0.0f, -CONE_HEIGHT, 0.0f },
-                    { 0.5f, 1.0f, 0.5f },
-                    { 0.0f, -1.0f, 0.0f }
+                const float a = 2 * PI * float(i) / CONE_SEGMENTS;
+                const float c = std::cos(a), s = std::sin(a);
+                vertices.push_back({ {r * c,0,r * s}, {0.5f + 0.5f * c,0.5f + 0.5f * s}, {0,1,0} });
+                indices.insert(indices.end(), {
+                    apex + i, i, i + 1, center, base + (i + 1) % CONE_SEGMENTS, base + i
                     });
             }
 
-            const uint32_t base_center =
-                static_cast<uint32_t>(vertices.size());
-
-            Vertex center{};
-
-            center.color[0] = 0.5f;
-            center.color[2] = 0.5f;
-            center.normal[1] = 1.0f;
-
-            vertices.push_back(center);
-
-            const uint32_t base_start =
-                static_cast<uint32_t>(vertices.size());
-
-            for (uint32_t i = 0; i < CONE_SEGMENTS; ++i) {
-                const float angle =
-                    2.0f * PI * float(i) / float(CONE_SEGMENTS);
-
-                const float c = std::cos(angle);
-                const float s = std::sin(angle);
-
-                Vertex v{};
-
-                v.position[0] = CONE_RADIUS * c;
-                v.position[2] = CONE_RADIUS * s;
-
-                v.color[0] = c * 0.5f + 0.5f;
-                v.color[2] = s * 0.5f + 0.5f;
-
-                v.normal[1] = 1.0f;
-
-                vertices.push_back(v);
-            }
-
-            for (uint32_t i = 0; i < CONE_SEGMENTS; ++i) {
-                const uint32_t next = (i + 1) % CONE_SEGMENTS;
-
-                indices.push_back(apex_start + i);
-                indices.push_back(i);
-                indices.push_back(next);
-
-                indices.push_back(base_center);
-                indices.push_back(base_start + next);
-                indices.push_back(base_start + i);
-            }
-
-            vk_index_count = static_cast<uint32_t>(indices.size());
-
-            if (!graphics::createMappedBuffer(
-                vertices.size() * sizeof(Vertex),
-                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                vk_vertex_buffer,
-                vk_vertex_buffer_allocation,
-                vk_vertex_buffer_memory,
-                vertices.data())) {
-                return false;
-            }
-
-            return graphics::createMappedBuffer(
-                indices.size() * sizeof(uint32_t),
-                VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                vk_index_buffer,
-                vk_index_buffer_allocation,
-                vk_index_buffer_memory,
-                indices.data()
-            );
+            index_count = static_cast<uint32_t>(indices.size());
+            return graphics::uploadGeometry(vertices.size() * sizeof(Vertex),
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices.data(),
+                vertex_buffer.buffer, vertex_buffer.allocation)
+                && graphics::uploadGeometry(indices.size() * sizeof(uint32_t),
+                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data(),
+                    index_buffer.buffer, index_buffer.allocation);
         }
 
         bool createLightMarkerGeometry()
         {
-            std::vector<Vertex> vertices;
+            std::vector<Vertex> v;
             const float corners[8][3] = {
-                {-0.5f, -0.5f, -0.5f}, { 0.5f, -0.5f, -0.5f},
-                { 0.5f,  0.5f, -0.5f}, {-0.5f,  0.5f, -0.5f},
-                {-0.5f, -0.5f,  0.5f}, { 0.5f, -0.5f,  0.5f},
-                { 0.5f,  0.5f,  0.5f}, {-0.5f,  0.5f,  0.5f}
+                {-0.5f,-0.5f,-0.5f}, {0.5f,-0.5f,-0.5f},
+                {0.5f,0.5f,-0.5f}, {-0.5f,0.5f,-0.5f},
+                {-0.5f,-0.5f,0.5f}, {0.5f,-0.5f,0.5f},
+                {0.5f,0.5f,0.5f}, {-0.5f,0.5f,0.5f}
             };
-            const uint32_t triangles[] = {
-                0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6,
-                0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7,
-                0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2
+            const unsigned ids[] = {
+                0,1,2, 0,2,3, 4,6,5, 4,7,6, 0,4,5, 0,5,1,
+                3,2,6, 3,6,7, 0,3,7, 0,7,4, 1,5,6, 1,6,2
             };
-            auto add_vertex = [&](float x, float y, float z) {
-                Vertex vertex{};
-                vertex.position[0] = x;
-                vertex.position[1] = y;
-                vertex.position[2] = z;
-                vertices.push_back(vertex);
+            auto add = [&](float x, float y, float z) {
+                v.push_back({ {x,y,z}, {0,0}, {0,0,0} });
                 };
-            for (uint32_t index : triangles) {
-                add_vertex(corners[index][0], corners[index][1], corners[index][2]);
-            }
-            g_marker_cube_count = static_cast<uint32_t>(vertices.size());
+            for (auto i : ids) add(corners[i][0], corners[i][1], corners[i][2]);
+            cube_vertex_count = static_cast<uint32_t>(v.size());
 
-            constexpr uint32_t segments = 32;
-            for (uint32_t i = 0; i < segments; ++i) {
-                const float a = 2.0f * PI * float(i) / float(segments);
-                const float b = 2.0f * PI * float(i + 1) / float(segments);
-                add_vertex(std::cos(a), std::sin(a), 1.0f);
-                add_vertex(std::cos(b), std::sin(b), 1.0f);
+            for (int i = 0; i < 32; ++i) {
+                float a = 2 * PI * i / 32, b = 2 * PI * (i + 1) / 32;
+                add(std::cos(a), std::sin(a), 1);
+                add(std::cos(b), std::sin(b), 1);
                 if (i % 8 == 0) {
-                    add_vertex(0.0f, 0.0f, 0.0f);
-                    add_vertex(std::cos(a), std::sin(a), 1.0f);
+                    add(0, 0, 0);
+                    add(std::cos(a), std::sin(a), 1);
                 }
             }
-            add_vertex(0.0f, 0.0f, 0.0f);
-            add_vertex(0.0f, 0.0f, 1.0f);
-            g_marker_line_count = static_cast<uint32_t>(vertices.size()) - g_marker_cube_count;
+            add(0, 0, 0);
+            add(0, 0, 1);
+            line_vertex_count = static_cast<uint32_t>(v.size()) - cube_vertex_count;
 
-            return graphics::createMappedBuffer(
-                vertices.size() * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                vk_marker_buffer, vk_marker_allocation, vk_marker_memory, vertices.data());
+            return graphics::uploadGeometry(v.size() * sizeof(Vertex),
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, v.data(),
+                marker_buffer.buffer, marker_buffer.allocation);
         }
 
-        bool makeSpotMarkerMatrix(const SpotLight& light, float model[4][4])
+        bool makeSpotMarkerMatrix(const SpotLight& light, float m[4][4])
         {
-            const float length_squared = light.direction[0] * light.direction[0]
-                + light.direction[1] * light.direction[1]
-                + light.direction[2] * light.direction[2];
-            if (length_squared < 0.00000001f) return false;
+            float f[3], right[3], up[3], ref[3] = { 0,1,0 };
+            const auto& d = light.direction;
+            const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (len < 0.0001f) return false;
 
-            float forward[3];
-            for (int i = 0; i < 3; ++i) {
-                forward[i] = light.direction[i] / std::sqrt(length_squared);
-            }
-            float reference[3] = { 0.0f, 1.0f, 0.0f };
-            if (std::fabs(forward[1]) > 0.99f) {
-                reference[0] = 1.0f;
-                reference[1] = 0.0f;
-            }
-            auto cross = [](const float a[3], const float b[3], float out[3]) {
+            for (int i = 0; i < 3; ++i) f[i] = d[i] / len;
+            if (std::fabs(f[1]) > 0.99f) { ref[0] = 1; ref[1] = 0; }
+
+            auto cross = [](const float* a, const float* b, float* out) {
                 out[0] = a[1] * b[2] - a[2] * b[1];
                 out[1] = a[2] * b[0] - a[0] * b[2];
                 out[2] = a[0] * b[1] - a[1] * b[0];
                 };
-            float right[3], up[3];
-            cross(reference, forward, right);
-            const float right_length = std::sqrt(
-                right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
-            for (float& component : right) component /= right_length;
-            cross(forward, right, up);
+            cross(ref, f, right);
+            const float k = std::sqrt(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+            for (float& x : right) x /= k;
+            cross(f, right, up);
 
-            const float outer_cos = std::fmax(0.0001f, std::fmin(1.0f, light.outer_angle));
-            const float radius = g_spot_visual_length * std::sqrt(1.0f - outer_cos * outer_cos) / outer_cos;
-            mat4_identity(model);
+            const float c = std::fmax(0.0001f, std::fmin(1.0f, light.outer_angle));
+            const float radius = spot_visual_length * std::sqrt(1 - c * c) / c;
+            mat4_identity(m);
             for (int i = 0; i < 3; ++i) {
-                model[0][i] = right[i] * radius;
-                model[1][i] = up[i] * radius;
-                model[2][i] = forward[i] * g_spot_visual_length;
-                model[3][i] = light.position[i];
+                m[0][i] = right[i] * radius;
+                m[1][i] = up[i] * radius;
+                m[2][i] = f[i] * spot_visual_length;
+                m[3][i] = light.position[i];
             }
             return true;
         }
 
-        void drawLightMarkers(VkCommandBuffer command_buffer)
+        void writeDescriptor(VkDescriptorSet set, uint32_t binding,
+            VkDescriptorType type, const Buffer& buffer, VkDeviceSize range)
         {
-            if (!g_show_light_markers && !g_show_spot_cones) return;
-            const VkDeviceSize offset = 0;
-            vkCmdBindVertexBuffers(command_buffer, 0, 1, &vk_marker_buffer, &offset);
-            auto draw = [&](const float model[4][4], const float color[3],
-                uint32_t count, uint32_t first_vertex) {
-                    MarkerPushConstants data{};
-                    mat4_multiply(vk_scene_uniform_memory->view_projection, model, data.mvp);
-                    for (int i = 0; i < 3; ++i) data.color[i] = color[i];
-                    data.color[3] = 1.0f;
-                    vkCmdPushConstants(command_buffer, vk_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(data), &data);
-                    vkCmdDraw(command_buffer, count, 1, first_vertex, 0);
-                };
-            if (g_show_light_markers) {
-                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
-                auto draw_cube = [&](const auto& light) {
-                    float model[4][4];
-                    mat4_scale(g_marker_size, g_marker_size, g_marker_size, model);
-                    for (int i = 0; i < 3; ++i) model[3][i] = light.position[i];
-                    draw(model, light.color, g_marker_cube_count, 0);
-                    };
-                for (const auto& light : g_point_lights) draw_cube(light);
-                for (const auto& light : g_spot_lights) draw_cube(light);
-            }
-            if (g_show_spot_cones) {
-                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_marker_line_pipeline);
-                const float white[3] = { 1.0f, 1.0f, 1.0f };
-                for (const auto& light : g_spot_lights) {
-                    float model[4][4];
-                    if (makeSpotMarkerMatrix(light, model)) {
-                        draw(model, white, g_marker_line_count, g_marker_cube_count);
-                    }
-                }
-            }
+            VkDescriptorBufferInfo info{ buffer.buffer, 0, range };
+            VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            w.dstSet = set;
+            w.dstBinding = binding;
+            w.descriptorCount = 1;
+            w.descriptorType = type;
+            w.pBufferInfo = &info;
+            vkUpdateDescriptorSets(ctx.device, 1, &w, 0, nullptr);
+        }
+
+        bool ensureModelCapacity(size_t required)
+        {
+            if (required <= model_capacity) return true;
+            if (required > UINT32_MAX / model_stride) return false;
+
+            Buffer next{};
+            if (!createMapped(next, required * model_stride, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
+                return false;
+
+            Buffer old = model_buffer;
+            model_buffer = next;
+            model_capacity = required;
+            for (auto set : material_sets)
+                if (set) writeDescriptor(set, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                    model_buffer, sizeof(ModelUniform));
+            destroyBuffer(old);
+            return true;
         }
 
         bool createUniformBuffer()
         {
-            if (!graphics::createMappedBuffer(
-                sizeof(SceneUniforms),
-                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                vk_scene_uniform_buffer,
-                vk_scene_uniform_allocation,
-                vk_scene_uniform_memory)) {
-                return false;
-            }
-
-            for (uint32_t i = 0; i < CONE_COUNT; ++i) {
-                if (!graphics::createMappedBuffer(
-                    sizeof(ModelUniform),
-                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                    vk_uniform_buffer[i],
-                    vk_uniform_buffer_allocation[i],
-                    vk_uniform_buffer_memory[i])) {
-                    return false;
-                }
-            }
-
-            return true;
+            VkPhysicalDeviceProperties props{};
+            vkGetPhysicalDeviceProperties(ctx.physical_device, &props);
+            const auto a = props.limits.minUniformBufferOffsetAlignment;
+            model_stride = (sizeof(ModelUniform) + a - 1) / a * a;
+            return createMapped(scene_buffer, sizeof(SceneUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)
+                && ensureModelCapacity(CONE_COUNT);
         }
 
-        void destroyLightStorageBuffer(LightStorageBuffer& storage)
+        void writeModel(size_t slot, const ModelUniform& data)
         {
-            auto& ctx = graphics::internal::context;
-
-            if (storage.buffer != VK_NULL_HANDLE) {
-                vmaDestroyBuffer(
-                    ctx.allocator,
-                    storage.buffer,
-                    storage.allocation
-                );
-            }
-
-            storage = LightStorageBuffer{};
+            std::memcpy(static_cast<unsigned char*>(model_buffer.memory) + slot * model_stride,
+                &data, sizeof(data));
         }
 
-        template<typename T>
-        bool createLightStorageBuffer(
-            const std::vector<T>& lights,
-            LightStorageBuffer& storage)
+        void bindModel(VkCommandBuffer cmd, size_t slot, int material)
         {
-            if (storage.buffer != VK_NULL_HANDLE) {
-                std::cerr << "Light storage buffer already exists\n";
-                return false;
-            }
-
-            const size_t count = lights.empty() ? 1 : lights.size();
-            const VkDeviceSize size =
-                VkDeviceSize(count) * sizeof(T);
-
-            if (!graphics::createMappedBuffer(
-                size,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                storage.buffer,
-                storage.allocation,
-                storage.memory)) {
-                return false;
-            }
-
-            storage.size = size;
-            std::memset(storage.memory, 0, static_cast<size_t>(size));
-
-            for (size_t i = 0; i < lights.size(); ++i) {
-                T gpu_light = lights[i];
-                for (int component = 0; component < 3; ++component) {
-                    gpu_light.color[component] *= gpu_light.intensity;
-                }
-                auto* destination = static_cast<unsigned char*>(storage.memory)
-                    + i * sizeof(T);
-                std::memcpy(destination, &gpu_light, sizeof(T));
-            }
-
-            if (vmaFlushAllocation(
-                graphics::internal::context.allocator,
-                storage.allocation, 0, size) != VK_SUCCESS) {
-                std::cerr << "Failed to flush light storage buffer\n";
-                destroyLightStorageBuffer(storage);
-                return false;
-            }
-
-            return true;
+            const uint32_t offset = static_cast<uint32_t>(slot * model_stride);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
+                1, 1, &material_sets[material], 1, &offset);
         }
 
-        bool createLightStorageBuffers()
+        template<class T>
+        bool makeLightBuffer(const std::vector<T>& list, Buffer& out)
         {
-            if (!createLightStorageBuffer(g_point_lights, g_point_light_buffer)
-                || !createLightStorageBuffer(g_spot_lights, g_spot_light_buffer)) {
+            const size_t count = list.empty() ? 1 : list.size();
+            if (!createMapped(out, count * sizeof(T), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) return false;
+
+            auto* dst = static_cast<unsigned char*>(out.memory);
+            std::memset(dst, 0, static_cast<size_t>(out.size));
+            for (size_t i = 0; i < list.size(); ++i) {
+                T data = list[i];
+                for (float& c : data.color) c *= data.intensity;
+                std::memcpy(dst + i * sizeof(T), &data, sizeof(T));
+            }
+            if (vmaFlushAllocation(ctx.allocator, out.allocation, 0, out.size) != VK_SUCCESS) {
+                destroyBuffer(out);
                 return false;
             }
-            g_uploaded_point_count = static_cast<uint32_t>(g_point_lights.size());
-            g_uploaded_spot_count = static_cast<uint32_t>(g_spot_lights.size());
             return true;
         }
 
         bool updateLightStorageBuffers()
         {
-            if (!g_lights_dirty) {
-                return true;
-            }
-
-            auto& ctx = graphics::internal::context;
-
-            LightStorageBuffer new_points;
-            LightStorageBuffer new_spots;
-
-            if (!createLightStorageBuffer(g_point_lights, new_points)) {
+            if (!lights_dirty) return true;
+            Buffer points{}, spots{};
+            if (!makeLightBuffer(point_lights, points)) return false;
+            if (!makeLightBuffer(spot_lights, spots)) {
+                destroyBuffer(points);
                 return false;
             }
-
-            if (!createLightStorageBuffer(g_spot_lights, new_spots)) {
-                destroyLightStorageBuffer(new_points);
-                return false;
-            }
-
             if (vkQueueWaitIdle(ctx.graphics_queue) != VK_SUCCESS) {
-                destroyLightStorageBuffer(new_points);
-                destroyLightStorageBuffer(new_spots);
+                destroyBuffer(points);
+                destroyBuffer(spots);
                 return false;
             }
 
-            const VkDescriptorBufferInfo buffer_infos[] = {
-                {
-                    .buffer = new_points.buffer,
-                    .offset = 0,
-                    .range = new_points.size,
-                },
-                {
-                    .buffer = new_spots.buffer,
-                    .offset = 0,
-                    .range = new_spots.size,
-                },
-            };
-
-            const VkWriteDescriptorSet writes[] = {
-                {
-                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    .dstSet = vk_scene_descriptor_set,
-                    .dstBinding = 1,
-                    .descriptorCount = 1,
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .pBufferInfo = &buffer_infos[0],
-                },
-                {
-                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    .dstSet = vk_scene_descriptor_set,
-                    .dstBinding = 2,
-                    .descriptorCount = 1,
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .pBufferInfo = &buffer_infos[1],
-                },
-            };
-
-            vkUpdateDescriptorSets(ctx.device, 2, writes, 0, nullptr);
-
-            destroyLightStorageBuffer(g_point_light_buffer);
-            destroyLightStorageBuffer(g_spot_light_buffer);
-
-            g_point_light_buffer = new_points;
-            g_spot_light_buffer = new_spots;
-
-            g_uploaded_point_count = static_cast<uint32_t>(g_point_lights.size());
-            g_uploaded_spot_count = static_cast<uint32_t>(g_spot_lights.size());
-            g_lights_dirty = false;
+            writeDescriptor(scene_set, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, points, points.size);
+            writeDescriptor(scene_set, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, spots, spots.size);
+            destroyBuffer(point_buffer);
+            destroyBuffer(spot_buffer);
+            point_buffer = points;
+            spot_buffer = spots;
+            uploaded_points = static_cast<uint32_t>(point_lights.size());
+            uploaded_spots = static_cast<uint32_t>(spot_lights.size());
+            lights_dirty = false;
             return true;
         }
 
-        void drawLightControls()
+        bool loadMaterialTextures()
         {
-            if (ImGui::CollapsingHeader(
-                "Point lights",
-                ImGuiTreeNodeFlags_DefaultOpen)) {
-
-                if (ImGui::Button("Add point light")) {
-                    g_point_lights.push_back({
-                        .position = { 1.5f, -0.5f, -2.0f },
-                        .color = { 1.0f, 1.0f, 1.0f },
-                        .intensity = 4.0f
-                        });
-                    g_lights_dirty = true;
-                }
-
-                ImGui::Text(
-                    "Count: %d",
-                    static_cast<int>(g_point_lights.size())
-                );
-
-                ImGui::PushID("point_lights");
-
-                for (size_t i = 0; i < g_point_lights.size();) {
-                    ImGui::PushID(static_cast<int>(i));
-
-                    auto& light = g_point_lights[i];
-
-                    ImGui::Separator();
-                    ImGui::Text("Point light %d", static_cast<int>(i + 1));
-
-                    if (ImGui::Button("Delete")) {
-                        g_point_lights.erase(
-                            g_point_lights.begin() +
-                            static_cast<std::ptrdiff_t>(i)
-                        );
-
-                        g_lights_dirty = true;
-                        ImGui::PopID();
-                        continue;
-                    }
-
-                    if (ImGui::DragFloat3("Position", light.position, 0.02f)) {
-                        g_lights_dirty = true;
-                    }
-
-                    if (ImGui::ColorEdit3("Color", light.color)) {
-                        g_lights_dirty = true;
-                    }
-
-                    if (ImGui::SliderFloat("Intensity", &light.intensity, 0.0f, 30.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp)) {
-                        g_lights_dirty = true;
-                    }
-
-                    ImGui::PopID();
-                    ++i;
-                }
-
-                ImGui::PopID();
+            for (uint32_t i = 0; i < MATERIAL_COUNT; ++i) {
+                if (!graphics::loadTexture(texture_files[i], textures[i])) return false;
             }
-
-            if (ImGui::CollapsingHeader(
-                "Spot lights",
-                ImGuiTreeNodeFlags_DefaultOpen)) {
-
-                if (ImGui::Button("Add spot light")) {
-                    g_spot_lights.push_back({
-                        .position = { 1.5f, -0.5f, -2.0f },
-                        .color = { 1.0f, 1.0f, 1.0f },
-                        .direction = { 0.0f, 0.0f, 1.0f },
-                        .angle = std::cos(15.0f * PI / 180.0f),
-                        .outer_angle = std::cos(25.0f * PI / 180.0f),
-                        .intensity = 4.0f
-                        });
-
-                    g_lights_dirty = true;
-                }
-
-                ImGui::Text(
-                    "Count: %d",
-                    static_cast<int>(g_spot_lights.size())
-                );
-
-                ImGui::PushID("spot_lights");
-
-                for (size_t i = 0; i < g_spot_lights.size();) {
-                    ImGui::PushID(static_cast<int>(i));
-
-                    auto& light = g_spot_lights[i];
-
-                    ImGui::Separator();
-                    ImGui::Text("Spot light %d", static_cast<int>(i + 1));
-
-                    if (ImGui::Button("Delete")) {
-                        g_spot_lights.erase(
-                            g_spot_lights.begin() +
-                            static_cast<std::ptrdiff_t>(i)
-                        );
-
-                        g_lights_dirty = true;
-                        ImGui::PopID();
-                        continue;
-                    }
-
-                    if (ImGui::DragFloat3("Position", light.position, 0.02f)) {
-                        g_lights_dirty = true;
-                    }
-
-                    if (ImGui::DragFloat3("Ray direction", light.direction, 0.02f)) {
-                        g_lights_dirty = true;
-                    }
-
-                    const float direction_length_squared =
-                        light.direction[0] * light.direction[0] +
-                        light.direction[1] * light.direction[1] +
-                        light.direction[2] * light.direction[2];
-
-                    if (direction_length_squared < 0.00000001f) {
-                        ImGui::TextUnformatted(
-                            "Set a non-zero ray direction."
-                        );
-                    }
-
-                    if (ImGui::ColorEdit3("Color", light.color)) {
-                        g_lights_dirty = true;
-                    }
-
-                    if (ImGui::SliderFloat("Intensity", &light.intensity, 0.0f, 30.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp)) {
-                        g_lights_dirty = true;
-                    }
-
-                    const float inner_cos = std::fmax(
-                        -1.0f, std::fmin(1.0f, light.angle));
-
-                    const float outer_cos = std::fmax(
-                        -1.0f, std::fmin(1.0f, light.outer_angle));
-
-                    float inner_degrees =
-                        std::acos(inner_cos) * 180.0f / PI;
-
-                    float outer_degrees =
-                        std::acos(outer_cos) * 180.0f / PI;
-
-                    bool angles_changed = false;
-
-                    if (ImGui::SliderFloat("Inner half-angle (deg)", &inner_degrees, 0.0f, 89.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp)) {
-
-                        if (inner_degrees > outer_degrees) {
-                            outer_degrees = inner_degrees;
-                        }
-
-                        angles_changed = true;
-                    }
-
-                    if (ImGui::SliderFloat("Outer half-angle (deg)", &outer_degrees, 0.0f, 89.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp)) {
-
-                        if (outer_degrees < inner_degrees) {
-                            inner_degrees = outer_degrees;
-                        }
-
-                        angles_changed = true;
-                    }
-
-                    if (angles_changed) {
-                        light.angle =
-                            std::cos(inner_degrees * PI / 180.0f);
-
-                        light.outer_angle =
-                            std::cos(outer_degrees * PI / 180.0f);
-
-                        g_lights_dirty = true;
-                    }
-
-                    ImGui::PopID();
-                    ++i;
-                }
-
-                ImGui::PopID();
-            }
+            return graphics::loadTexture("../textures/black.png", black)
+                && graphics::loadTexture("../textures/bars_specular.png", eyes)
+                && graphics::loadTexture("../textures/bars_emissive.png", glow);
         }
 
         bool createDescriptorSet()
         {
-            auto& ctx = graphics::internal::context;
-
+            constexpr VkShaderStageFlags both = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
             const VkDescriptorSetLayoutBinding scene_bindings[] = {
-                {
-                    .binding = 0,
-                    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_VERTEX_BIT |
-                                  VK_SHADER_STAGE_FRAGMENT_BIT,
-                },
-                {
-                    .binding = 1,
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-                },
-                {
-                    .binding = 2,
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-                },
+                {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, both, nullptr},
+                {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+                {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
+            };
+            const VkDescriptorSetLayoutBinding model_bindings[] = {
+                {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, both, nullptr},
+                {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+                {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+                {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
             };
 
-            const VkDescriptorSetLayoutCreateInfo scene_layout_info = {
-                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                .bindingCount = 3,
-                .pBindings = scene_bindings,
-            };
-
-            if (vkCreateDescriptorSetLayout(
-                ctx.device,
-                &scene_layout_info,
-                nullptr,
-                &vk_scene_set_layout) != VK_SUCCESS) {
-                std::cerr << "Failed to create scene descriptor layout\n";
-                return false;
-            }
-
-            const VkDescriptorSetLayoutBinding model_binding = {
-                .binding = 0,
-                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .descriptorCount = 1,
-                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT |
-                              VK_SHADER_STAGE_FRAGMENT_BIT,
-            };
-
-            const VkDescriptorSetLayoutCreateInfo model_layout_info = {
-                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                .bindingCount = 1,
-                .pBindings = &model_binding,
-            };
-
-            if (vkCreateDescriptorSetLayout(
-                ctx.device,
-                &model_layout_info,
-                nullptr,
-                &vk_model_set_layout) != VK_SUCCESS) {
-                std::cerr << "Failed to create model descriptor layout\n";
-                return false;
-            }
-
-            const VkDescriptorPoolSize pool_sizes[] = {
-                {
-                    .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                    .descriptorCount = CONE_COUNT + 1,
-                },
-                {
-                    .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 2,
-                },
-            };
-
-            const VkDescriptorPoolCreateInfo pool_info = {
-                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-                .maxSets = CONE_COUNT + 1,
-                .poolSizeCount = 2,
-                .pPoolSizes = pool_sizes,
-            };
-
-            if (vkCreateDescriptorPool(
-                ctx.device,
-                &pool_info,
-                nullptr,
-                &vk_descriptor_pool) != VK_SUCCESS) {
-                std::cerr << "Failed to create descriptor pool\n";
-                return false;
-            }
-
-            const auto allocate_set = [&](
-                VkDescriptorSetLayout layout,
-                VkDescriptorSet& descriptor_set) -> bool
-                {
-                    const VkDescriptorSetAllocateInfo alloc_info = {
-                        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                        .descriptorPool = vk_descriptor_pool,
-                        .descriptorSetCount = 1,
-                        .pSetLayouts = &layout,
-                    };
-
-                    if (vkAllocateDescriptorSets(
-                        ctx.device,
-                        &alloc_info,
-                        &descriptor_set) != VK_SUCCESS) {
-                        std::cerr << "Failed to allocate descriptor set\n";
-                        return false;
-                    }
-
-                    return true;
+            auto makeLayout = [&](const VkDescriptorSetLayoutBinding* bindings, uint32_t count,
+                VkDescriptorSetLayout& layout) {
+                    VkDescriptorSetLayoutCreateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+                    info.bindingCount = count;
+                    info.pBindings = bindings;
+                    return vkCreateDescriptorSetLayout(ctx.device, &info, nullptr, &layout) == VK_SUCCESS;
                 };
+            if (!makeLayout(scene_bindings, 3, scene_layout) ||
+                !makeLayout(model_bindings, 4, model_layout)) return false;
 
-            const auto write_buffer = [&](
-                VkDescriptorSet descriptor_set,
-                uint32_t binding,
-                VkDescriptorType type,
-                VkBuffer buffer,
-                VkDeviceSize size)
-                {
-                    const VkDescriptorBufferInfo buffer_info = {
-                        .buffer = buffer,
-                        .offset = 0,
-                        .range = size,
-                    };
-
-                    const VkWriteDescriptorSet write = {
-                        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                        .dstSet = descriptor_set,
-                        .dstBinding = binding,
-                        .descriptorCount = 1,
-                        .descriptorType = type,
-                        .pBufferInfo = &buffer_info,
-                    };
-
-                    vkUpdateDescriptorSets(ctx.device, 1, &write, 0, nullptr);
-                };
-
-            if (!allocate_set(
-                vk_scene_set_layout,
-                vk_scene_descriptor_set)) {
+            const VkDescriptorPoolSize sizes[] = {
+                {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
+                {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, MATERIAL_COUNT},
+                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * MATERIAL_COUNT}
+            };
+            VkDescriptorPoolCreateInfo pool{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+            pool.maxSets = 1 + MATERIAL_COUNT;
+            pool.poolSizeCount = 4;
+            pool.pPoolSizes = sizes;
+            if (vkCreateDescriptorPool(ctx.device, &pool, nullptr, &descriptor_pool) != VK_SUCCESS)
                 return false;
-            }
 
-            write_buffer(
-                vk_scene_descriptor_set,
-                0,
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                vk_scene_uniform_buffer,
-                sizeof(SceneUniforms)
-            );
+            auto alloc = [&](VkDescriptorSetLayout layout, VkDescriptorSet& set) {
+                VkDescriptorSetAllocateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+                info.descriptorPool = descriptor_pool;
+                info.descriptorSetCount = 1;
+                info.pSetLayouts = &layout;
+                return vkAllocateDescriptorSets(ctx.device, &info, &set) == VK_SUCCESS;
+                };
+            if (!alloc(scene_layout, scene_set)) return false;
+            writeDescriptor(scene_set, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                scene_buffer, sizeof(SceneUniforms));
+            writeDescriptor(scene_set, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, point_buffer, point_buffer.size);
+            writeDescriptor(scene_set, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, spot_buffer, spot_buffer.size);
 
-            write_buffer(
-                vk_scene_descriptor_set,
-                1,
-                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                g_point_light_buffer.buffer,
-                g_point_light_buffer.size
-            );
+            for (uint32_t i = 0; i < MATERIAL_COUNT; ++i) {
+                auto& set = material_sets[i];
+                if (!alloc(model_layout, set)) return false;
+                writeDescriptor(set, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                    model_buffer, sizeof(ModelUniform));
 
-            write_buffer(
-                vk_scene_descriptor_set,
-                2,
-                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                g_spot_light_buffer.buffer,
-                g_spot_light_buffer.size
-            );
-
-            for (uint32_t i = 0; i < CONE_COUNT; ++i) {
-                if (!allocate_set(
-                    vk_model_set_layout,
-                    vk_descriptor_set[i])) {
-                    return false;
+                // binding 1 — фотография, 2 — карта блика, 3 — карта свечения.
+                const graphics::Texture* maps[] = {
+                    &textures[i], i == BARS ? &eyes : &black, i == BARS ? &glow : &black
+                };
+                for (uint32_t k = 0; k < 3; ++k) {
+                    VkDescriptorImageInfo image{
+                        maps[k]->sampler, maps[k]->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                    };
+                    VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                    w.dstSet = set;
+                    w.dstBinding = 1 + k;
+                    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    w.descriptorCount = 1;
+                    w.pImageInfo = &image;
+                    vkUpdateDescriptorSets(ctx.device, 1, &w, 0, nullptr);
                 }
-
-                write_buffer(
-                    vk_descriptor_set[i],
-                    0,
-                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                    vk_uniform_buffer[i],
-                    sizeof(ModelUniform)
-                );
             }
-
             return true;
         }
 
         VkShaderModule loadShaderModule(const char* path)
         {
-            FILE* file = fopen(path, "rb");
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
             if (!file) {
-                std::cerr << "Failed to open shader file: " << path << '\n';
+                std::cerr << "Failed to open shader: " << path << '\n';
                 return VK_NULL_HANDLE;
             }
-            fseek(file, 0, SEEK_END);
-            const long size = ftell(file);
-            fseek(file, 0, SEEK_SET);
-            std::vector<char> buffer(static_cast<size_t>(size));
-            fread(buffer.data(), 1, static_cast<size_t>(size), file);
-            fclose(file);
+            const std::streamoff size = file.tellg();
+            if (size <= 0 || size % 4 != 0) return VK_NULL_HANDLE;
+            std::vector<uint32_t> code(static_cast<size_t>(size) / 4);
+            file.seekg(0);
+            if (!file.read(reinterpret_cast<char*>(code.data()), size)) return VK_NULL_HANDLE;
 
-            const VkShaderModuleCreateInfo info = {
-                .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-                .codeSize = static_cast<size_t>(size),
-                .pCode = reinterpret_cast<const uint32_t*>(buffer.data()),
-            };
-            VkShaderModule module = VK_NULL_HANDLE;
-            if (vkCreateShaderModule(graphics::internal::context.device, &info,
-                nullptr, &module) != VK_SUCCESS) {
-                std::cerr << "Failed to create shader module: " << path << '\n';
+            VkShaderModuleCreateInfo info{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+            info.codeSize = static_cast<size_t>(size);
+            info.pCode = code.data();
+            VkShaderModule module{};
+            if (vkCreateShaderModule(ctx.device, &info, nullptr, &module) != VK_SUCCESS)
                 return VK_NULL_HANDLE;
-            }
             return module;
         }
 
         bool createPipeline()
         {
-            auto& ctx = graphics::internal::context;
+            vertex_shader = loadShaderModule("../shaders/cone.vert.spv");
+            fragment_shader = loadShaderModule("../shaders/cone.frag.spv");
+            if (!vertex_shader || !fragment_shader) return false;
 
-            vk_vertex_shader = loadShaderModule(VERT_SHADER_PATH);
-            vk_fragment_shader = loadShaderModule(FRAG_SHADER_PATH);
-            if (!vk_vertex_shader || !vk_fragment_shader) return false;
-
-            const VkPipelineShaderStageCreateInfo stages[] = {
-                {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                    .stage = VK_SHADER_STAGE_VERTEX_BIT,
-                    .module = vk_vertex_shader,
-                    .pName = "main",
-                },
-                {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                    .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-                    .module = vk_fragment_shader,
-                    .pName = "main",
-                },
-            };
-
-            const VkVertexInputBindingDescription vertex_binding = {
-                .binding = 0,
-                .stride = sizeof(Vertex),
-                .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
-            };
-            const VkVertexInputAttributeDescription vertex_attributes[] = {
-                {
-                    .location = 0,
-                    .binding = 0,
-                    .format = VK_FORMAT_R32G32B32_SFLOAT,
-                    .offset = offsetof(Vertex, position),
-                },
-                {
-                    .location = 1,
-                    .binding = 0,
-                    .format = VK_FORMAT_R32G32B32_SFLOAT,
-                    .offset = offsetof(Vertex, color),
-                },
-                {
-                    .location = 2,
-                    .binding = 0,
-                    .format = VK_FORMAT_R32G32B32_SFLOAT,
-                    .offset = offsetof(Vertex, normal),
-                },
-            };
-            const VkPipelineVertexInputStateCreateInfo vertex_input = {
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                .vertexBindingDescriptionCount = 1,
-                .pVertexBindingDescriptions = &vertex_binding,
-                .vertexAttributeDescriptionCount = 3,
-                .pVertexAttributeDescriptions = vertex_attributes,
-            };
-
-            VkPipelineInputAssemblyStateCreateInfo input_assembly = {
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-                .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            };
-
-            const VkPipelineViewportStateCreateInfo viewport_state = {
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-                .viewportCount = 1,
-                .scissorCount = 1,
-            };
-
-            const VkPipelineRasterizationStateCreateInfo raster = {
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                .polygonMode = VK_POLYGON_MODE_FILL,
-                .cullMode = VK_CULL_MODE_NONE,
-                .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-                .lineWidth = 1.0f,
-            };
-
-            const VkPipelineMultisampleStateCreateInfo multisample = {
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-                .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-            };
-
-            VkPipelineDepthStencilStateCreateInfo depth_stencil = {
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-                .depthTestEnable = VK_TRUE,
-                .depthWriteEnable = VK_TRUE,
-                .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
-            };
-
-            const VkPipelineColorBlendAttachmentState color_attachment = {
-                .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                  VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-            };
-            const VkPipelineColorBlendStateCreateInfo color_blend = {
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-                .attachmentCount = 1,
-                .pAttachments = &color_attachment,
-            };
-
-            const VkDynamicState dynamic_states[] = {
-                VK_DYNAMIC_STATE_VIEWPORT,
-                VK_DYNAMIC_STATE_SCISSOR,
-            };
-            const VkPipelineDynamicStateCreateInfo dynamic_state = {
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                .dynamicStateCount = 2,
-                .pDynamicStates = dynamic_states,
-            };
-
-            const VkDescriptorSetLayout set_layouts[] = {
-                vk_scene_set_layout,
-                vk_model_set_layout,
-            };
-
-            const VkPushConstantRange push_range = {
-                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                .offset = 0,
-                .size = sizeof(MarkerPushConstants),
-            };
-
-            const VkPipelineLayoutCreateInfo layout_info = {
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                .setLayoutCount = 2,
-                .pSetLayouts = set_layouts,
-                .pushConstantRangeCount = 1,
-                .pPushConstantRanges = &push_range,
-            };
-            if (vkCreatePipelineLayout(ctx.device, &layout_info, nullptr,
-                &vk_pipeline_layout) != VK_SUCCESS) {
-                std::cerr << "Failed to create pipeline layout\n";
-                return false;
+            VkPipelineShaderStageCreateInfo stages[2]{};
+            for (auto& stage : stages) {
+                stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                stage.pName = "main";
             }
+            stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+            stages[0].module = vertex_shader;
+            stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            stages[1].module = fragment_shader;
 
-            const VkGraphicsPipelineCreateInfo pipeline_info = {
-                .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-                .stageCount = 2,
-                .pStages = stages,
-                .pVertexInputState = &vertex_input,
-                .pInputAssemblyState = &input_assembly,
-                .pViewportState = &viewport_state,
-                .pRasterizationState = &raster,
-                .pMultisampleState = &multisample,
-                .pDepthStencilState = &depth_stencil,
-                .pColorBlendState = &color_blend,
-                .pDynamicState = &dynamic_state,
-                .layout = vk_pipeline_layout,
-                .renderPass = ctx.render_pass,
-                .subpass = 0,
+            const VkVertexInputBindingDescription binding{ 0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX };
+            const VkVertexInputAttributeDescription attrs[] = {
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)},
+                {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex, uv)},
+                {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)}
             };
+            VkPipelineVertexInputStateCreateInfo input{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+            input.vertexBindingDescriptionCount = 1;
+            input.pVertexBindingDescriptions = &binding;
+            input.vertexAttributeDescriptionCount = 3;
+            input.pVertexAttributeDescriptions = attrs;
 
-            if (vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &pipeline_info,
-                nullptr, &vk_pipeline) != VK_SUCCESS) {
-                std::cerr << "Failed to create graphics pipeline\n";
+            VkPipelineInputAssemblyStateCreateInfo assembly{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+            assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+            VkPipelineViewportStateCreateInfo viewport{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+            viewport.viewportCount = viewport.scissorCount = 1;
+
+            VkPipelineRasterizationStateCreateInfo raster{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+            raster.polygonMode = VK_POLYGON_MODE_FILL;
+            raster.cullMode = VK_CULL_MODE_NONE;
+            raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+            raster.lineWidth = 1;
+
+            VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+            ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+            VkPipelineDepthStencilStateCreateInfo depth{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+            depth.depthTestEnable = VK_TRUE;
+            depth.depthWriteEnable = VK_TRUE;
+            depth.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+            VkPipelineColorBlendAttachmentState attachment{};
+            attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            VkPipelineColorBlendStateCreateInfo blend{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+            blend.attachmentCount = 1;
+            blend.pAttachments = &attachment;
+
+            const VkDynamicState states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo dynamic{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+            dynamic.dynamicStateCount = 2;
+            dynamic.pDynamicStates = states;
+
+            const VkDescriptorSetLayout layouts[] = { scene_layout, model_layout };
+            const VkPushConstantRange range{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TextureEffect) };
+            VkPipelineLayoutCreateInfo li{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+            li.setLayoutCount = 2;
+            li.pSetLayouts = layouts;
+            li.pushConstantRangeCount = 1;
+            li.pPushConstantRanges = &range;
+            if (vkCreatePipelineLayout(ctx.device, &li, nullptr, &pipeline_layout) != VK_SUCCESS)
                 return false;
-            }
 
-            input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
-            depth_stencil.depthWriteEnable = VK_FALSE;
-            if (vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &pipeline_info,
-                nullptr, &vk_marker_line_pipeline) != VK_SUCCESS) return false;
+            VkGraphicsPipelineCreateInfo info{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+            info.stageCount = 2;
+            info.pStages = stages;
+            info.pVertexInputState = &input;
+            info.pInputAssemblyState = &assembly;
+            info.pViewportState = &viewport;
+            info.pRasterizationState = &raster;
+            info.pMultisampleState = &ms;
+            info.pDepthStencilState = &depth;
+            info.pColorBlendState = &blend;
+            info.pDynamicState = &dynamic;
+            info.layout = pipeline_layout;
+            info.renderPass = ctx.render_pass;
+            info.subpass = 0;
 
-            return true;
+            if (vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline)
+                != VK_SUCCESS) return false;
+
+            assembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+            depth.depthWriteEnable = VK_FALSE;
+            return vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &info, nullptr,
+                &line_pipeline) == VK_SUCCESS;
         }
 
-    }
+        void drawLightControls()
+        {
+            auto common = [](auto& light) {
+                if (ImGui::DragFloat3("Position", light.position, 0.02f)) lights_dirty = true;
+                if (ImGui::ColorEdit3("Color", light.color)) lights_dirty = true;
+                if (ImGui::SliderFloat("Intensity", &light.intensity, 0, 30, "%.3f",
+                    ImGuiSliderFlags_AlwaysClamp)) lights_dirty = true;
+                };
+
+            if (ImGui::CollapsingHeader("Point lights", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::PushID("point_lights");
+                if (ImGui::Button("Add point light")) {
+                    point_lights.push_back({ {1.5f,-0.5f,-2}, {1,1,1}, 4 });
+                    lights_dirty = true;
+                }
+                ImGui::Text("Count: %d", static_cast<int>(point_lights.size()));
+                for (size_t i = 0; i < point_lights.size();) {
+                    ImGui::PushID(static_cast<int>(i));
+                    ImGui::Separator();
+                    ImGui::Text("Point light %d", static_cast<int>(i + 1));
+                    if (ImGui::Button("Delete")) {
+                        point_lights.erase(point_lights.begin() + static_cast<std::ptrdiff_t>(i));
+                        lights_dirty = true;
+                        ImGui::PopID();
+                        continue;
+                    }
+                    common(point_lights[i]);
+                    ImGui::PopID();
+                    ++i;
+                }
+                ImGui::PopID();
+            }
+
+            if (ImGui::CollapsingHeader("Spot lights", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::PushID("spot_lights");
+                if (ImGui::Button("Add spot light")) {
+                    spot_lights.push_back({ {1.5f,-0.5f,-2}, {1,1,1}, {0,0,1},
+                                           std::cos(radians(15)), std::cos(radians(25)), 4 });
+                    lights_dirty = true;
+                }
+                ImGui::Text("Count: %d", static_cast<int>(spot_lights.size()));
+                for (size_t i = 0; i < spot_lights.size();) {
+                    ImGui::PushID(static_cast<int>(i));
+                    ImGui::Separator();
+                    ImGui::Text("Spot light %d", static_cast<int>(i + 1));
+                    if (ImGui::Button("Delete")) {
+                        spot_lights.erase(spot_lights.begin() + static_cast<std::ptrdiff_t>(i));
+                        lights_dirty = true;
+                        ImGui::PopID();
+                        continue;
+                    }
+                    auto& light = spot_lights[i];
+                    common(light);
+                    if (ImGui::DragFloat3("Ray direction", light.direction, 0.02f)) lights_dirty = true;
+
+                    const auto& d = light.direction;
+                    if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < 0.00000001f)
+                        ImGui::TextUnformatted("Set a non-zero ray direction.");
+
+                    float inner = std::acos(std::fmax(-1.f, std::fmin(1.f, light.angle))) * 180 / PI;
+                    float outer = std::acos(std::fmax(-1.f, std::fmin(1.f, light.outer_angle))) * 180 / PI;
+                    bool changed = false;
+                    if (ImGui::SliderFloat("Inner half-angle (deg)", &inner, 0, 89, "%.1f",
+                        ImGuiSliderFlags_AlwaysClamp)) {
+                        if (outer < inner) outer = inner;
+                        changed = true;
+                    }
+                    if (ImGui::SliderFloat("Outer half-angle (deg)", &outer, 0, 89, "%.1f",
+                        ImGuiSliderFlags_AlwaysClamp)) {
+                        if (inner > outer) inner = outer;
+                        changed = true;
+                    }
+                    if (changed) {
+                        light.angle = std::cos(radians(inner));
+                        light.outer_angle = std::cos(radians(outer));
+                        lights_dirty = true;
+                    }
+                    ImGui::PopID();
+                    ++i;
+                }
+                ImGui::PopID();
+            }
+        }
+
+        void drawLightMarkers(VkCommandBuffer cmd)
+        {
+            if (!show_markers && !show_spot_cones) return;
+            const VkDeviceSize zero = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &marker_buffer.buffer, &zero);
+
+            size_t slot = CONE_COUNT;
+            const TextureEffect disabled{};
+            vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(disabled), &disabled);
+
+            auto draw = [&](const float m[4][4], const float rgb[3], uint32_t count, uint32_t first) {
+                ModelUniform data{};
+                std::memcpy(data.model, m, sizeof(data.model));
+                std::memcpy(data.albedo, rgb, sizeof(data.albedo));
+                data.unlit = 1;
+                writeModel(slot, data);
+                bindModel(cmd, slot++, 0);
+                vkCmdDraw(cmd, count, 1, first, 0);
+                };
+
+            if (show_markers) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+                auto cube = [&](const auto& light) {
+                    float m[4][4];
+                    mat4_scale(marker_size, marker_size, marker_size, m);
+                    for (int i = 0; i < 3; ++i) m[3][i] = light.position[i];
+                    draw(m, light.color, cube_vertex_count, 0);
+                    };
+                for (const auto& light : point_lights) cube(light);
+                for (const auto& light : spot_lights) cube(light);
+            }
+            if (show_spot_cones) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, line_pipeline);
+                const float white[3] = { 1,1,1 };
+                for (const auto& light : spot_lights) {
+                    float m[4][4];
+                    if (makeSpotMarkerMatrix(light, m))
+                        draw(m, white, line_vertex_count, cube_vertex_count);
+                }
+            }
+        }
+
+    } // namespace
 
     bool initialize()
     {
-        if (!createConeGeometry() ||
-            !createLightMarkerGeometry() ||
-            !createUniformBuffer() ||
-            !createLightStorageBuffers() ||
-            !createDescriptorSet() ||
-            !createPipeline()) {
+        if (!createConeGeometry() || !createLightMarkerGeometry() ||
+            !createUniformBuffer() || !loadMaterialTextures() ||
+            !makeLightBuffer(point_lights, point_buffer) ||
+            !makeLightBuffer(spot_lights, spot_buffer) ||
+            !createDescriptorSet() || !createPipeline()) {
+            std::cerr << "Failed to initialize Lab 3\n";
             shutdown();
             return false;
         }
 
-        for (auto& cone : g_cones) mat4_identity(cone.g_model);
-        g_cones[1].g_position[0] = -1.25f;
-        g_cones[1].g_albedo[0] = 1.0f;
-        g_cones[1].g_albedo[1] = 0.4f;
-        g_cones[1].g_albedo[2] = 0.4f;
-        g_cones[1].g_anim_playing = false;
-        g_cones[2].g_position[2] = 0.75f;
-        g_cones[2].g_albedo[0] = 0.4f;
-        g_cones[2].g_albedo[1] = 0.6f;
-        g_cones[2].g_albedo[2] = 1.0f;
-        g_cones[2].g_anim_playing = false;
+        for (auto& cone : cones) mat4_identity(cone.model);
+        cones[0].material = 0;
+        cones[0].texture_effect = true;
+
+        cones[1].material = 1;
+        cones[1].position[0] = -1.25f;
+        cones[1].albedo[1] = 0.4f;
+        cones[1].albedo[2] = 0.4f;
+        cones[1].playing = false;
+
+        cones[2].material = 2;
+        cones[2].position[2] = 0.75f;
+        cones[2].albedo[0] = 0.4f;
+        cones[2].albedo[1] = 0.6f;
+        cones[2].playing = false;
+
         updateCamera();
-
-        g_last_time = 0.0;
-
+        last_time = 0;
         return true;
     }
 
     void shutdown()
     {
-        auto& ctx = graphics::internal::context;
         vkQueueWaitIdle(ctx.graphics_queue);
+        vkDestroyPipeline(ctx.device, line_pipeline, nullptr);
+        vkDestroyPipeline(ctx.device, pipeline, nullptr);
+        vkDestroyPipelineLayout(ctx.device, pipeline_layout, nullptr);
+        vkDestroyShaderModule(ctx.device, vertex_shader, nullptr);
+        vkDestroyShaderModule(ctx.device, fragment_shader, nullptr);
+        vkDestroyDescriptorPool(ctx.device, descriptor_pool, nullptr);
+        vkDestroyDescriptorSetLayout(ctx.device, model_layout, nullptr);
+        vkDestroyDescriptorSetLayout(ctx.device, scene_layout, nullptr);
 
-        vkDestroyPipeline(ctx.device, vk_marker_line_pipeline, nullptr);
-        vk_marker_line_pipeline = VK_NULL_HANDLE;
-        if (vk_marker_buffer) {
-            vmaDestroyBuffer(ctx.allocator, vk_marker_buffer, vk_marker_allocation);
-            vk_marker_buffer = VK_NULL_HANDLE;
-            vk_marker_allocation = nullptr;
-            vk_marker_memory = nullptr;
-        }
+        for (auto& tex : textures) graphics::destroyTexture(tex);
+        graphics::destroyTexture(black);
+        graphics::destroyTexture(eyes);
+        graphics::destroyTexture(glow);
+        for (auto& set : material_sets) set = VK_NULL_HANDLE;
 
-        vkDestroyPipeline(ctx.device, vk_pipeline, nullptr);
-        vkDestroyPipelineLayout(ctx.device, vk_pipeline_layout, nullptr);
-        vkDestroyShaderModule(ctx.device, vk_vertex_shader, nullptr);
-        vkDestroyShaderModule(ctx.device, vk_fragment_shader, nullptr);
-
-        vkDestroyDescriptorPool(ctx.device, vk_descriptor_pool, nullptr);
-        vk_descriptor_pool = VK_NULL_HANDLE;
-        vk_scene_descriptor_set = VK_NULL_HANDLE;
-
-        destroyLightStorageBuffer(g_point_light_buffer);
-        destroyLightStorageBuffer(g_spot_light_buffer);
-
-        vkDestroyDescriptorSetLayout(
-            ctx.device, vk_scene_set_layout, nullptr);
-        vk_scene_set_layout = VK_NULL_HANDLE;
-
-        vkDestroyDescriptorSetLayout(
-            ctx.device, vk_model_set_layout, nullptr);
-        vk_model_set_layout = VK_NULL_HANDLE;
-
-        if (vk_scene_uniform_buffer) {
-            vmaDestroyBuffer(
-                ctx.allocator,
-                vk_scene_uniform_buffer,
-                vk_scene_uniform_allocation
-            );
-
-            vk_scene_uniform_buffer = VK_NULL_HANDLE;
-            vk_scene_uniform_allocation = nullptr;
-            vk_scene_uniform_memory = nullptr;
-        }
-
-        for (uint32_t i = 0; i < CONE_COUNT; ++i) {
-            if (vk_uniform_buffer[i]) {
-                vmaDestroyBuffer(ctx.allocator, vk_uniform_buffer[i], vk_uniform_buffer_allocation[i]);
-                vk_uniform_buffer[i] = VK_NULL_HANDLE;
-                vk_uniform_buffer_allocation[i] = nullptr;
-                vk_uniform_buffer_memory[i] = nullptr;
-            }
-        }
-        if (vk_index_buffer) vmaDestroyBuffer(ctx.allocator, vk_index_buffer, vk_index_buffer_allocation);
-        if (vk_vertex_buffer) vmaDestroyBuffer(ctx.allocator, vk_vertex_buffer, vk_vertex_buffer_allocation);
+        destroyBuffer(model_buffer);
+        destroyBuffer(scene_buffer);
+        destroyBuffer(point_buffer);
+        destroyBuffer(spot_buffer);
+        destroyBuffer(marker_buffer);
+        destroyBuffer(index_buffer);
+        destroyBuffer(vertex_buffer);
+        model_capacity = 0;
     }
 
     void update(double time)
     {
-        const double dt = (g_last_time == 0.0) ? 0.0 : (time - g_last_time);
-        g_last_time = time;
+        const float dt = last_time == 0 ? 0.f : static_cast<float>(time - last_time);
+        last_time = time;
 
-        ImGui::Begin("Lab 2 - Camera and Lighting");
+        ImGui::Begin("Lab 3 - Texture mapping");
 
         ImGui::SeparatorText("Directional light");
-
-        ImGui::DragFloat3("Light ray direction", g_light_direction, 0.02f
-        );
-
-        ImGui::ColorEdit3("Light color", g_light_color);
-
-        ImGui::SliderFloat("Light intensity", &g_light_intensity, 0.0f, 5.0f);
+        ImGui::DragFloat3("Light ray direction", light_direction, 0.02f);
+        ImGui::ColorEdit3("Light color", light_color);
+        ImGui::SliderFloat("Light intensity", &light_intensity, 0, 5);
 
         ImGui::SeparatorText("Ambient light");
-
-        ImGui::ColorEdit3("Ambient color", g_ambient_color);
-
-        ImGui::SliderFloat("Ambient intensity", &g_ambient_intensity, 0.0f, 1.0f);
-
+        ImGui::ColorEdit3("Ambient color", ambient_color);
+        ImGui::SliderFloat("Ambient intensity", &ambient_intensity, 0, 1);
         drawLightControls();
 
         ImGui::SeparatorText("Light visualization");
-        ImGui::Checkbox("Show light markers", &g_show_light_markers);
-        ImGui::Checkbox("Show spot cones", &g_show_spot_cones);
-        ImGui::SliderFloat("Marker size", &g_marker_size, 0.03f, 0.3f,
-            "%.2f", ImGuiSliderFlags_AlwaysClamp);
-        ImGui::SliderFloat("Cone display length", &g_spot_visual_length, 0.1f, 5.0f,
-            "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::Checkbox("Show light markers", &show_markers);
+        ImGui::Checkbox("Show spot cones", &show_spot_cones);
+        ImGui::SliderFloat("Marker size", &marker_size, 0.03f, 0.3f);
+        ImGui::SliderFloat("Cone display length", &spot_visual_length, 0.1f, 5);
 
         ImGui::TextUnformatted("Select cone:");
-        ImGui::RadioButton("Cone 1", &g_selected_cone, 0);
+        ImGui::RadioButton("Cone 1", &selected_cone, 0);
         ImGui::SameLine();
-        ImGui::RadioButton("Cone 2", &g_selected_cone, 1);
+        ImGui::RadioButton("Cone 2", &selected_cone, 1);
         ImGui::SameLine();
-        ImGui::RadioButton("Cone 3", &g_selected_cone, 2);
-        auto& selected = g_cones[g_selected_cone];
+        ImGui::RadioButton("Cone 3", &selected_cone, 2);
+        auto& c = cones[selected_cone];
 
         ImGui::SeparatorText("Camera");
-
-        ImGui::SliderFloat3("Camera position", g_camera.position, -10.0f, 10.0f);
-
-        ImGui::SliderFloat3("Camera rotation (deg)", g_camera.rotation_degrees, -180.0f, 180.0f);
-
-        int camera_proj_mode =
-            static_cast<int>(g_camera.projection_mode);
-
-        ImGui::RadioButton("Perspective", &camera_proj_mode, 0);
+        ImGui::SliderFloat3("Camera position", camera.position, -10, 10);
+        ImGui::SliderFloat3("Camera rotation (deg)", camera.rotation_degrees, -180, 180);
+        ImGui::RadioButton("Perspective", &camera.projection_mode, 0);
         ImGui::SameLine();
-        ImGui::RadioButton("Orthographic", &camera_proj_mode, 1);
-
-        g_camera.projection_mode =
-            static_cast<ProjectionMode>(camera_proj_mode);
-
-        if (g_camera.projection_mode == ProjectionMode::Perspective) {
-            ImGui::SliderFloat("Camera FOV (deg)", &g_camera.fov_degrees, 20.0f, 120.0f);
-        }
-        else {
-            ImGui::SliderFloat("Camera ortho scale", &g_camera.ortho_scale, 0.2f, 5.0f);
-        }
-
-        if (ImGui::Button("Reset camera")) {
-            g_camera = CameraState{};
-        }
+        ImGui::RadioButton("Orthographic", &camera.projection_mode, 1);
+        if (camera.projection_mode == 0)
+            ImGui::SliderFloat("Camera FOV (deg)", &camera.fov_degrees, 20, 120);
+        else
+            ImGui::SliderFloat("Camera ortho scale", &camera.ortho_scale, 0.2f, 5);
+        if (ImGui::Button("Reset camera")) camera = CameraState{};
 
         ImGui::SeparatorText("Transform");
-        ImGui::SliderFloat3("Position", selected.g_position, -3.0f, 3.0f);
-        ImGui::SliderFloat3("Rotation (deg)", selected.g_rotation_degrees, -180.0f, 180.0f);
-        ImGui::SliderFloat3("Scale", selected.g_scale, 0.1f, 3.0f);
+        ImGui::SliderFloat3("Position", c.position, -3, 3);
+        ImGui::SliderFloat3("Rotation (deg)", c.rotation_degrees, -180, 180);
+        ImGui::SliderFloat3("Scale", c.scale, 0.1f, 3, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 
         ImGui::SeparatorText("Animation");
-        ImGui::Checkbox("Playing", &selected.g_anim_playing);
-        ImGui::SliderFloat("Speed", &selected.g_anim_speed, 0.0f, 5.0f);
-        ImGui::SliderFloat("Trajectory radius", &selected.g_anim_radius, 0.0f, 5.0f);
-        ImGui::SliderFloat("Trajectory height", &selected.g_anim_height, -2.0f, 2.0f);
-        ImGui::SliderFloat("Self-rotation speed", &selected.g_anim_rot_speed, 0.0f, 5.0f);
-
-        if (ImGui::Button("Reset animation time")) {
-            selected.g_anim_time = 0.0f;
-        }
+        ImGui::Checkbox("Playing", &c.playing);
+        ImGui::SliderFloat("Speed", &c.speed, 0, 5);
+        ImGui::SliderFloat("Trajectory radius", &c.radius, 0, 5);
+        ImGui::SliderFloat("Trajectory height", &c.height, -2, 2);
+        ImGui::SliderFloat("Self-rotation speed", &c.rotation_speed, 0, 5);
+        if (ImGui::Button("Reset animation time")) c.anim_time = 0;
 
         ImGui::SeparatorText("Material");
-
-        ImGui::ColorEdit3("Albedo multiplier", selected.g_albedo);
-
-        ImGui::ColorEdit3("Specular color", selected.g_specular_color);
-
-        ImGui::SliderFloat("Alpha (shininess)", &selected.g_alpha, 1.0f, 256.0f);
+        ImGui::Combo("Texture", &c.material, material_names, static_cast<int>(MATERIAL_COUNT));
+        ImGui::Checkbox("Animated texture", &c.texture_effect);
+        ImGui::ColorEdit3("Albedo multiplier", c.albedo);
+        ImGui::ColorEdit3("Specular color", c.specular);
+        ImGui::SliderFloat("Alpha (shininess)", &c.alpha, 1, 256);
 
         ImGui::End();
-
-        for (auto& cone : g_cones) {
-            if (cone.g_anim_playing) {
-                cone.g_anim_time += float(dt) * cone.g_anim_speed;
-            }
-
-            const float t = cone.g_anim_time;
-
-            float T[4][4], R[4][4], S[4][4];
-            float Rx[4][4], Ry[4][4], Rz[4][4], tmp1[4][4];
-
-            const float px = cone.g_position[0] + cone.g_anim_radius * cosf(t);
-
-            const float py = cone.g_position[1] + cone.g_anim_height;
-
-            const float pz = cone.g_position[2] + cone.g_anim_radius * sinf(t);
-
-            mat4_translation(px, py, pz, T);
-
-            const float anim_rot_y = t * cone.g_anim_rot_speed;
-
-            mat4_rotation_x(cone.g_rotation_degrees[0] * PI / 180.0f, Rx);
-
-            mat4_rotation_y(cone.g_rotation_degrees[1] * PI / 180.0f + anim_rot_y, Ry);
-
-            mat4_rotation_z(cone.g_rotation_degrees[2] * PI / 180.0f, Rz);
-
-            mat4_multiply(Ry, Rx, tmp1);
-            mat4_multiply(tmp1, Rz, R);
-
-            mat4_scale(
-                cone.g_scale[0],
-                cone.g_scale[1],
-                cone.g_scale[2],
-                S
-            );
-
-            mat4_multiply(R, S, tmp1);
-            mat4_multiply(T, tmp1, cone.g_model);
-        }
-
+        for (auto& cone : cones) updateCone(cone, dt);
         updateCamera();
-
     }
 
     void render(const graphics::internal::FrameData& fd)
     {
-        auto& ctx = graphics::internal::context;
-
-        if (!updateLightStorageBuffers()) {
+        if (!updateLightStorageBuffers())
             std::cerr << "Failed to update light buffers\n";
+
+        SceneUniforms scene{};
+        mat4_multiply(camera.projection, view, scene.view_projection);
+        for (int i = 0; i < 3; ++i) {
+            scene.camera_position[i] = camera.position[i];
+            scene.directional_light_direction[i] = light_direction[i];
+            scene.directional_light_color[i] = light_color[i] * light_intensity;
+            scene.ambient_light[i] = ambient_color[i] * ambient_intensity;
         }
+        scene.point_light_count = uploaded_points;
+        scene.spot_light_count = uploaded_spots;
+        std::memcpy(scene_buffer.memory, &scene, sizeof(scene));
+        if (vmaFlushAllocation(ctx.allocator, scene_buffer.allocation, 0, sizeof(scene)) != VK_SUCCESS)
+            std::cerr << "Failed to flush scene UBO\n";
 
-        auto& scene = *vk_scene_uniform_memory;
-
-        mat4_multiply(
-            g_camera.projection,
-            g_view,
-            scene.view_projection
-        );
-
-        for (int component = 0; component < 3; ++component) {
-            scene.camera_position[component] =
-                g_camera.position[component];
-
-            scene.directional_light_direction[component] =
-                g_light_direction[component];
-
-            scene.directional_light_color[component] =
-                g_light_color[component] * g_light_intensity;
-
-            scene.ambient_light[component] =
-                g_ambient_color[component] * g_ambient_intensity;
-        }
-
-        scene.point_light_count = g_uploaded_point_count;
-        scene.spot_light_count = g_uploaded_spot_count;
-
-        if (vmaFlushAllocation(
-            ctx.allocator,
-            vk_scene_uniform_allocation,
-            0,
-            sizeof(SceneUniforms)) != VK_SUCCESS) {
-            std::cerr << "Failed to flush scene uniform buffer\n";
-        }
+        const size_t needed = CONE_COUNT
+            + (show_markers ? point_lights.size() + spot_lights.size() : 0)
+            + (show_spot_cones ? spot_lights.size() : 0);
+        const bool markers_fit = ensureModelCapacity(needed);
 
         for (uint32_t i = 0; i < CONE_COUNT; ++i) {
-            auto& model = *vk_uniform_buffer_memory[i];
-
-            memcpy(
-                model.model,
-                g_cones[i].g_model,
-                sizeof(model.model)
-            );
-
-            memcpy(
-                model.albedo,
-                g_cones[i].g_albedo,
-                sizeof(model.albedo)
-            );
-
-            for (int component = 0; component < 3; ++component) {
-                model.specular[component] =
-                    g_cones[i].g_specular_color[component];
-            }
-
-            model.alpha = g_cones[i].g_alpha;
-
-            if (vmaFlushAllocation(
-                ctx.allocator,
-                vk_uniform_buffer_allocation[i],
-                0,
-                sizeof(ModelUniform)) != VK_SUCCESS) {
-                std::cerr << "Failed to flush model uniform buffer\n";
-            }
+            ModelUniform m{};
+            std::memcpy(m.model, cones[i].model, sizeof(m.model));
+            std::memcpy(m.albedo, cones[i].albedo, sizeof(m.albedo));
+            std::memcpy(m.specular, cones[i].specular, sizeof(m.specular));
+            m.alpha = cones[i].alpha;
+            writeModel(i, m);
         }
 
-        vkResetCommandBuffer(fd.command_buffer, 0);
+        const auto cmd = fd.command_buffer;
+        vkResetCommandBuffer(cmd, 0);
+        VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &begin);
 
-        const VkCommandBufferBeginInfo begin_info = {
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        };
-        vkBeginCommandBuffer(fd.command_buffer, &begin_info);
+        VkClearValue clear[2]{};
+        clear[0].color.float32[0] = 0.1f;
+        clear[0].color.float32[1] = 0.1f;
+        clear[0].color.float32[2] = 0.1f;
+        clear[0].color.float32[3] = 1;
+        clear[1].depthStencil.depth = 1;
 
-        const VkClearValue clear_values[] = {
-            {.color = {.float32 = { 0.1f, 0.1f, 0.1f, 1.0f } } },
-            {.depthStencil = {.depth = 1.0f, .stencil = 0 } },
-        };
-        const VkRenderPassBeginInfo render_pass_begin = {
-            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-            .renderPass = ctx.render_pass,
-            .framebuffer = fd.framebuffer,
-            .renderArea = {.offset = { 0, 0 }, .extent = ctx.swapchain_extent },
-            .clearValueCount = 2,
-            .pClearValues = clear_values,
-        };
-        vkCmdBeginRenderPass(fd.command_buffer, &render_pass_begin,
-            VK_SUBPASS_CONTENTS_INLINE);
+        VkRenderPassBeginInfo rp{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        rp.renderPass = ctx.render_pass;
+        rp.framebuffer = fd.framebuffer;
+        rp.renderArea.extent = ctx.swapchain_extent;
+        rp.clearValueCount = 2;
+        rp.pClearValues = clear;
+        vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
-        const VkViewport viewport = {
-            .x = 0.0f,
-            .y = 0.0f,
-            .width = float(ctx.swapchain_extent.width),
-            .height = float(ctx.swapchain_extent.height),
-            .minDepth = 0.0f,
-            .maxDepth = 1.0f,
-        };
-        const VkRect2D scissor = { .extent = ctx.swapchain_extent };
-        vkCmdSetViewport(fd.command_buffer, 0, 1, &viewport);
-        vkCmdSetScissor(fd.command_buffer, 0, 1, &scissor);
+        const VkViewport vp{ 0, 0, float(ctx.swapchain_extent.width),
+                                  float(ctx.swapchain_extent.height), 0, 1 };
+        const VkRect2D scissor{ {0,0}, ctx.swapchain_extent };
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-        vkCmdBindPipeline(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
-
-        const MarkerPushConstants model_mode{};
-        vkCmdPushConstants(fd.command_buffer, vk_pipeline_layout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0, sizeof(model_mode), &model_mode);
-
-        const VkDeviceSize vertex_offset = 0;
-        vkCmdBindVertexBuffers(fd.command_buffer, 0, 1, &vk_vertex_buffer, &vertex_offset);
-        vkCmdBindIndexBuffer(fd.command_buffer, vk_index_buffer, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdBindDescriptorSets(
-            fd.command_buffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            vk_pipeline_layout,
-            0,
-            1,
-            &vk_scene_descriptor_set,
-            0,
-            nullptr
-        );
+        const VkDeviceSize zero = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffer.buffer, &zero);
+        vkCmdBindIndexBuffer(cmd, index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_layout, 0, 1, &scene_set, 0, nullptr);
 
         for (uint32_t i = 0; i < CONE_COUNT; ++i) {
-            vkCmdBindDescriptorSets(
-                fd.command_buffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                vk_pipeline_layout,
-                1,
-                1,
-                &vk_descriptor_set[i],
-                0,
-                nullptr
-            );
-
-            vkCmdDrawIndexed(
-                fd.command_buffer,
-                vk_index_count,
-                1,
-                0,
-                0,
-                0
-            );
+            bindModel(cmd, i, cones[i].material);
+            const TextureEffect effect{ cones[i].texture_effect ? 1u : 0u,
+                                       static_cast<float>(last_time) };
+            vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(effect), &effect);
+            vkCmdDrawIndexed(cmd, index_count, 1, 0, 0, 0);
         }
 
-        drawLightMarkers(fd.command_buffer);
+        if (markers_fit) drawLightMarkers(cmd);
 
-        vkCmdEndRenderPass(fd.command_buffer);
-        vkEndCommandBuffer(fd.command_buffer);
+        if (vmaFlushAllocation(ctx.allocator, model_buffer.allocation, 0,
+            (markers_fit ? needed : CONE_COUNT) * model_stride) != VK_SUCCESS)
+            std::cerr << "Failed to flush model UBO\n";
+
+        vkCmdEndRenderPass(cmd);
+        vkEndCommandBuffer(cmd);
     }
 
 } // namespace application

@@ -11,7 +11,8 @@ namespace graphics {
         VkBuffer& buffer,
         VmaAllocation& allocation,
         void*& memory,
-        const void* initial_data);
+        const void* initial_data
+    );
 
     template<typename T>
     bool createMappedBuffer(
@@ -27,12 +28,31 @@ namespace graphics {
         }
 
         void* mapped_memory = nullptr;
-
         const bool success = createMappedBufferRaw(
-            size, usage, buffer, allocation, mapped_memory, initial_data);
+            size, usage, buffer, allocation, mapped_memory, initial_data
+        );
 
         memory = static_cast<T*>(mapped_memory);
         return success;
     }
+
+    struct Texture {
+        VkImage image{};
+        VmaAllocation allocation{};
+        VkImageView view{};
+        VkSampler sampler{};
+    };
+
+    bool uploadGeometry(
+        VkDeviceSize bytes,
+        VkBufferUsageFlags usage,
+        const void* data,
+        VkBuffer& buffer,
+        VmaAllocation& allocation
+    );
+
+    bool loadTexture(const char* path, Texture& result);
+
+    void destroyTexture(Texture& texture);
 
 } // namespace graphics
