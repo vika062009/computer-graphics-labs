@@ -85,16 +85,18 @@ vec3 sample_albedo(vec2 uv)
         return texture(albedo_map, uv).rgb;
     }
 
-    float dx = 0.012 + 0.008 * sin(effect.time);
-    float red   = texture(albedo_map, uv + vec2(dx, 0.0)).r;
-    float green = texture(albedo_map, uv).g;
-    float blue  = texture(albedo_map, uv - vec2(dx, 0.0)).b;
+    float spread = 0.015 * (1.0 - cos(2.0 * effect.time));
+    vec2 offset = vec2(spread, 0.0);
 
-    vec3 modulation =
-        0.85 + 0.15 * cos(effect.time + vec3(0.0, 2.0, 4.0));
-    return vec3(red, green, blue) * modulation;
+    vec3 center = texture(albedo_map, uv).rgb;
+    vec3 left   = texture(albedo_map, uv - offset).rgb;
+    vec3 right  = texture(albedo_map, uv + offset).rgb;
+
+    vec3 color = 0.5 * center + 0.25 * left + 0.25 * right;
+
+    float gain = 0.65 + 0.35 * cos(6.283185 * uv.y - 1.5 * effect.time);
+    return color * gain;
 }
-
 void main()
 {
     if (model_uniforms.unlit != 0u) {
